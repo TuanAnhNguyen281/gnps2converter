@@ -1,0 +1,5 @@
+Compound_Name	Adduct	Precursor_MZ	molecular_formula	MZErrorPPM	RT_Query	mz_fragments
+Caffeic acid	[M-H]-	179.0340	C9H8O4	2.21594	12.02	135 (100); 107 (42)
+Quercetin	[M-H]-	301.0354	C15H10O7	1.876	8.45	179 (62); 151 (100)
+Rutin	[M-H]-	609.1461	C27H30O16	3.125	6.20	301 (100)
+Unmatched demo	[M+H]+	999.9990	C1H1	9.8	20.00	
