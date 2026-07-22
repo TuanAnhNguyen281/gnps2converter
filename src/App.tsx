@@ -3,6 +3,8 @@ import { AnimatePresence, motion } from 'framer-motion';
 import type { AnalysisResult, ColumnMapping, FilePreview, MatchRow, PreviewValue } from './types';
 
 const MoleculeScene = lazy(() => import('./MoleculeScene'));
+const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '');
+const apiUrl = (path: string) => `${apiBaseUrl}${path}`;
 
 const icons = {
   flask: <svg viewBox="0 0 24 24"><path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 1.7 3h10.6a2 2 0 0 0 1.7-3l-5-9V3M7.5 15h9"/></svg>,
@@ -82,7 +84,7 @@ function FileViewer({ files, previews, onSheet, initialActive='tsv', onClose }: 
 }
 
 async function download(url: string, rows: MatchRow[], extension: string, title: string) {
-  const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rows, title, fileName: title }) });
+  const response = await fetch(apiUrl(url), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rows, title, fileName: title }) });
   if (!response.ok) throw new Error((await response.json()).message ?? 'Không thể xuất file.');
   const blob = await response.blob(); const objectUrl = URL.createObjectURL(blob);
   const safeTitle = title.replace(/[\\/:*?"<>|]/g, '_').trim() || 'GNPS2_Report';
@@ -135,7 +137,7 @@ export default function App() {
     const requestId = ++previewRequests.current[kind];
     setPreviews(current=>({...current,[kind]:{...current[kind],loading:true,error:''}}));
     const body = new FormData(); body.append('file',file); if(sheetName) body.append('sheetName',sheetName);
-    try { const response=await fetch('/api/files/preview',{method:'POST',body}); const payload=await response.json() as FilePreview&{message?:string}; if(!response.ok) throw new Error(payload.message??'Không thể đọc file.'); if(previewRequests.current[kind]!==requestId)return; setPreviews(current=>({...current,[kind]:{data:payload,loading:false,error:''}})); }
+    try { const response=await fetch(apiUrl('/api/files/preview'),{method:'POST',body}); const payload=await response.json() as FilePreview&{message?:string}; if(!response.ok) throw new Error(payload.message??'Không thể đọc file.'); if(previewRequests.current[kind]!==requestId)return; setPreviews(current=>({...current,[kind]:{data:payload,loading:false,error:''}})); }
     catch(caught){if(previewRequests.current[kind]!==requestId)return;setPreviews(current=>({...current,[kind]:{...current[kind],loading:false,error:caught instanceof Error?caught.message:'Không thể đọc file.'}}));}
   }
   function selectTsv(file:File){setTsv(file);setReportTitle(titleFromFile(file.name));void loadPreview(file,'tsv');}
@@ -147,7 +149,7 @@ export default function App() {
     const data = new FormData(); data.append('tsv', tsv); data.append('xlsx', xlsx);
     if (forcedMapping) data.append('mapping', JSON.stringify(forcedMapping));
     try {
-      const response = await fetch('/api/analyze', { method: 'POST', body: data }); const payload = await response.json();
+      const response = await fetch(apiUrl('/api/analyze'), { method: 'POST', body: data }); const payload = await response.json();
       if (!response.ok) {
         if (payload.code === 'COLUMN_MAPPING_REQUIRED') { setHeaders({ tsv: payload.tsvHeaders, excel: payload.excelHeaders }); setMapping(payload.mapping); setMappingOpen(true); return; }
         throw new Error(payload.message ?? 'Phân tích thất bại.');
@@ -161,7 +163,7 @@ export default function App() {
     if (!taskUrl.trim()) { setError('Hãy nhập link GNPS2 Task.'); return; }
     setLoading(true); setLoadingMode('task'); setError(''); setStructureMessage('');
     try {
-      const response = await fetch('/api/gnps-task/import', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url:taskUrl.trim()}) });
+      const response = await fetch(apiUrl('/api/gnps-task/import'), { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url:taskUrl.trim()}) });
       const payload = await response.json() as AnalysisResult & { message?: string; title?: string };
       if (!response.ok) throw new Error(payload.message ?? 'Không thể đọc task GNPS2.');
       setResult(payload); setReportTitle(payload.title || 'GNPS2 Report'); setGnpsUrl(taskUrl.trim()); setStage('results');
@@ -181,7 +183,7 @@ export default function App() {
   async function resolveStructures() {
     if (!result || !gnpsUrl.trim()) return; const targets = result.rows.filter(row => row.selected);
     if (!targets.length) return; setStructureLoading(true); setError(''); setStructureMessage('');
-    try { const response = await fetch('/api/structures/gnps2', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url:gnpsUrl.trim(),rows:targets.map(({id,compoundName})=>({id,compoundName}))}) }); const payload = await response.json() as {message?:string;resolved:Array<{id:string;structureData?:string}>;found:number;libraryMatches:number}; if(!response.ok) throw new Error(payload.message); const map = new Map<string,string|undefined>(payload.resolved.map(item=>[item.id,item.structureData])); setResult({...result,rows:result.rows.map(row=>targets.some(target=>target.id===row.id)?{...row,structureData:map.get(row.id)}:row)}); setStructureMessage(`Đã lấy ${payload.found}/${targets.length} ảnh từ ${payload.libraryMatches} Library Matches. Dòng không có ảnh được để trống.`); }
+    try { const response = await fetch(apiUrl('/api/structures/gnps2'), { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url:gnpsUrl.trim(),rows:targets.map(({id,compoundName})=>({id,compoundName}))}) }); const payload = await response.json() as {message?:string;resolved:Array<{id:string;structureData?:string}>;found:number;libraryMatches:number}; if(!response.ok) throw new Error(payload.message); const map = new Map<string,string|undefined>(payload.resolved.map(item=>[item.id,item.structureData])); setResult({...result,rows:result.rows.map(row=>targets.some(target=>target.id===row.id)?{...row,structureData:map.get(row.id)}:row)}); setStructureMessage(`Đã lấy ${payload.found}/${targets.length} ảnh từ ${payload.libraryMatches} Library Matches. Dòng không có ảnh được để trống.`); }
     catch(e){setError(e instanceof Error?e.message:'Không thể tra cứu PubChem.');} finally{setStructureLoading(false);}
   }
 

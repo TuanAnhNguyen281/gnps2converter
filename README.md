@@ -85,3 +85,20 @@ npm run typecheck
 npm run build
 npm audit
 ```
+
+## Deploy: Railway backend + Vercel frontend
+
+Repo có hai pipeline build độc lập:
+
+```bash
+npm run build:server  # Railway -> dist-server/
+npm run build:web     # Vercel -> dist/
+```
+
+- `railway.json` dùng Railpack, chạy backend bằng `npm start` và healthcheck `/api/health`.
+- `vercel.json` chỉ build Vite SPA và rewrite route giao diện về `index.html`.
+- Trên Vercel, đặt `VITE_API_BASE_URL=https://<backend>.up.railway.app` cho Production/Preview.
+- Trên Railway, đặt `FRONTEND_ORIGIN=https://<frontend>.vercel.app`. Có thể nhập nhiều origin, phân cách bằng dấu phẩy.
+- Hai URL không có dấu `/` ở cuối. Sau khi thay environment variable, redeploy service tương ứng.
+
+Luồng khuyến nghị: deploy Railway lấy backend URL → đặt URL đó trên Vercel và deploy → lấy domain Vercel → đặt `FRONTEND_ORIGIN` trên Railway → redeploy Railway.

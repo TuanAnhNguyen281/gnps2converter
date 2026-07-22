@@ -29,6 +29,25 @@ const require = createRequire(import.meta.url);
 app.disable('x-powered-by');
 app.use(express.json({ limit: '15mb' }));
 
+const frontendOrigins = (process.env.FRONTEND_ORIGIN ?? '')
+  .split(',').map((value) => value.trim().replace(/\/$/, '')).filter(Boolean);
+app.use((request, response, next) => {
+  const origin = request.headers.origin?.replace(/\/$/, '');
+  const isLocal = !!origin && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
+  if (origin && !isLocal && !frontendOrigins.includes(origin)) {
+    return response.status(403).json({ message: 'Origin không được phép truy cập API.' });
+  }
+  if (origin) {
+    response.setHeader('Access-Control-Allow-Origin', origin);
+    response.setHeader('Vary', 'Origin');
+    response.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+    response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    response.setHeader('Access-Control-Max-Age', '86400');
+  }
+  if (request.method === 'OPTIONS') return response.sendStatus(204);
+  next();
+});
+
 function safeName(input: string) {
   return input.replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_').trim().slice(0, 100) || 'report';
 }
@@ -353,4 +372,4 @@ if (existsSync(path.join(root, 'dist'))) {
   app.use(express.static(dist));
   app.get('*', (_request, response) => response.sendFile(path.join(dist, 'index.html')));
 }
-app.listen(port, () => console.log(`GNPS2 API listening on http://localhost:${port}`));
+app.listen(port, '0.0.0.0', () => console.log(`GNPS2 API listening on http://0.0.0.0:${port}`));

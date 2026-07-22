@@ -3,9 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=20.17 <23"
+  },
   "scripts": {
     "dev": "concurrently -n api,web -c cyan,magenta \"tsx watch server/index.ts\" \"vite\"",
     "build": "tsc -b && vite build",
+    "build:web": "tsc -p tsconfig.app.json && vite build",
+    "build:server": "tsc -p tsconfig.server.json",
     "start": "node dist-server/index.js",
     "typecheck": "tsc -b",
     "test": "vitest run"
