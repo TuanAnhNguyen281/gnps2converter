@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: gnps2converter-api
+    runtime: node
+    plan: free
+    buildCommand: npm ci --include=dev && npm run build:server
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeployTrigger: commit
+    envVars:
+      - key: FRONTEND_ORIGIN
+        sync: false
