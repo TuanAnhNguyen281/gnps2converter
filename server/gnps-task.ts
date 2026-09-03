@@ -82,6 +82,13 @@ function splitCompound(value: unknown): { name: string; adduct: string } {
   return { name: match ? raw.slice(0, match.index).trim() : raw, adduct: match?.[1] ?? '' };
 }
 
+export function normalizeSourceMetadata(row: Record<string, unknown>) {
+  return Object.fromEntries(Object.entries(row).map(([key, value]) => {
+    if (value == null) return [key, null];
+    return [key, typeof value === 'string' || typeof value === 'number' ? value : JSON.stringify(value)];
+  }));
+}
+
 export function parseMgfFragments(mgf: string): Map<string, string> {
   const result = new Map<string, string>();
   for (const block of mgf.split(/BEGIN IONS/i).slice(1)) {
@@ -200,6 +207,7 @@ export async function importGnpsTask(input: string) {
         deltaDa: 0, deltaPpm: 0, deltaRt: graphRt && fallbackRt ? Math.abs(graphRt - fallbackRt) : 0,
         candidateCount: node ? 1 : 0, molecularFormula: String(item.molecular_formula ?? item.MolecularFormula ?? enriched[offset].structure.formula ?? ''),
         fragments: enriched[offset].fragments, reportedMzErrorPpm: item.MZErrorPPM == null ? null : parseNumber(item.MZErrorPPM),
+        sourceMetadata: normalizeSourceMetadata(item),
         status: node && graphRt ? 'matched' : rt ? 'ambiguous' : 'unmatched', structureData: enriched[offset].structure.image,
       });
     });

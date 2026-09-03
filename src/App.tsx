@@ -1,8 +1,10 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import { AnimatePresence, motion } from 'framer-motion';
 import type { AnalysisResult, ColumnMapping, FilePreview, MatchRow, PreviewValue } from './types';
 
-const MoleculeScene = lazy(() => import('./MoleculeScene'));
+const SciFiBackground = lazy(() => import('./SciFiBackground'));
+
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '');
 const apiUrl = (path: string) => `${apiBaseUrl}${path}`;
 
@@ -17,16 +19,63 @@ const icons = {
   sun: <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M2 12h2m16 0h2M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42"/></svg>,
   moon: <svg viewBox="0 0 24 24"><path d="M20 15.4A8.5 8.5 0 0 1 8.6 4a8.5 8.5 0 1 0 11.4 11.4Z"/></svg>,
   close: <svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg>,
+  external: <svg viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M18 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h6"/></svg>,
+  refresh: <svg viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5M6.1 8a7 7 0 0 1 11.5-1.6L20 9M4 15l2.4 2.6A7 7 0 0 0 17.9 16"/></svg>,
+  copy: <svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>,
 };
 
 type Stage = 'upload' | 'results';
 type PreviewKind = 'tsv' | 'xlsx';
 type PreviewStatus = { data: FilePreview | null; loading: boolean; error: string };
+type ThemeViewTransition = { ready: Promise<void>; finished: Promise<void> };
 const mappingLabels: Record<keyof ColumnMapping, string> = {
   compoundName: 'Tên hoạt chất (TSV) *', adduct: 'Ion/Adduct (TSV)', precursorMz: 'Precursor m/z (TSV) *',
   formula: 'Công thức phân tử (TSV)', reportedPpm: 'Sai số MZErrorPPM (TSV)', fragments: 'Mảnh vỡ (TSV)',
   excelCompoundName: 'Tên đối chiếu (Excel) *', excelRt: 'tR (min) từ Excel *',
 };
+
+const preferredMetadataColumns = [
+  'SpectrumID', '#Scan#', 'SpectrumFile', 'LibraryName', 'MQScore', 'TIC_Query', 'RT_Query', 'MZErrorPPM',
+  'SharedPeaks', 'MassDiff', 'SpecMZ', 'SpecCharge', 'FileScanUniqueID', 'NumberHits', 'Compound_Name',
+  'Ion_Source', 'Instrument', 'Compound_Source', 'PI', 'Data_Collector', 'Adduct', 'Precursor_MZ', 'ExactMass',
+  'Charge', 'CAS_Number', 'Pubmed_ID', 'Smiles', 'INCHI', 'INCHI_AUX', 'Library_Class', 'IonMode', 'Organism',
+  'LibMZ', 'UpdateWorkflowName', 'LibraryQualityString', 'tags', 'molecular_formula', 'InChIKey', 'InChIKey-Planar',
+  'superclass', 'class', 'subclass', 'npclassifier_superclass', 'npclassifier_class', 'npclassifier_pathway', 'library_usi',
+] as const;
+
+const metadataHeaderLabels: Record<string, string> = {
+  SpectrumID: 'Mã phổ', '#Scan#': 'Số scan', SpectrumFile: 'Tệp phổ', LibraryName: 'Tên thư viện', MQScore: 'Điểm MQ',
+  TIC_Query: 'TIC truy vấn', RT_Query: 'RT truy vấn', MZErrorPPM: 'Sai số MZ (ppm)', SharedPeaks: 'Đỉnh chung', MassDiff: 'Chênh lệch khối lượng', SpecMZ: 'MZ phổ', SpecCharge: 'Điện tích phổ',
+  FileScanUniqueID: 'ID scan duy nhất', NumberHits: 'Số kết quả', Compound_Name: 'Tên hợp chất', Ion_Source: 'Nguồn ion', Instrument: 'Thiết bị', Compound_Source: 'Nguồn hợp chất', PI: 'PI', Data_Collector: 'Người thu thập', Adduct: 'Ion cộng', Precursor_MZ: 'MZ tiền chất', ExactMass: 'Khối lượng chính xác', Charge: 'Điện tích', CAS_Number: 'Số CAS', Pubmed_ID: 'Mã PubMed', Smiles: 'Cấu trúc SMILES', INCHI: 'Cấu trúc InChI', INCHI_AUX: 'InChI phụ', Library_Class: 'Cấp thư viện', IonMode: 'Chế độ ion', Organism: 'Sinh vật', LibMZ: 'MZ thư viện', UpdateWorkflowName: 'Quy trình cập nhật', LibraryQualityString: 'Chất lượng thư viện', tags: 'Nhãn', molecular_formula: 'Công thức phân tử', InChIKey: 'Khóa InChI', 'InChIKey-Planar': 'Khóa InChI phẳng', superclass: 'Siêu lớp', class: 'Lớp', subclass: 'Phân lớp', npclassifier_superclass: 'Siêu lớp NPClassifier', npclassifier_class: 'Lớp NPClassifier', npclassifier_pathway: 'Con đường NPClassifier', library_usi: 'USI thư viện',
+};
+
+function metadataHeaderLabel(column: string) {
+  return metadataHeaderLabels[column] ?? column.replaceAll('_', ' ').replaceAll('-', ' ');
+}
+
+function metadataText(value: string | number | null | undefined) {
+  return value == null || value === '' ? '—' : String(value);
+}
+
+function gnpsCompareUrl(result: AnalysisResult, rawUrl: string) {
+  if (result.task && /^[a-f0-9]{32}$/i.test(result.task)) {
+    return `https://gnps2.org/result?task=${result.task}&viewname=librarymatches`;
+  }
+  try {
+    const url = new URL(rawUrl.trim());
+    if (url.protocol !== 'https:' || !['gnps2.org', 'www.gnps2.org'].includes(url.hostname.toLowerCase())) return '';
+    const task = url.searchParams.get('task');
+    if (url.pathname.includes('/status') && task) return `https://gnps2.org/result?task=${encodeURIComponent(task)}&viewname=librarymatches`;
+    return url.toString();
+  } catch { return ''; }
+}
+
+function MetadataCell({ value }: { value: string | number | null | undefined }) {
+  const text = metadataText(value);
+  return <td className="metadata-cell" title={text}><span>{text}</span>{text !== '—' && <button type="button" aria-label={`Sao chép ${text}`} title="Sao chép" onClick={() => void navigator.clipboard?.writeText(text)}>{icons.copy}</button>}</td>;
+}
+
+type EngineStatus = 'checking' | 'ready' | 'offline';
 
 function FileDrop({ accept, label, hint, file, onFile }: { accept: string; label: string; hint: string; file: File | null; onFile: (file: File) => void }) {
   const input = useRef<HTMLInputElement>(null);
@@ -114,8 +163,90 @@ export default function App() {
   const [loadingMode, setLoadingMode] = useState<'task'|'files'|null>(null);
   const [detailRow, setDetailRow] = useState<MatchRow | null>(null);
   const [viewerTarget, setViewerTarget] = useState<PreviewKind | null>(null);
+  const [gnpsViewerOpen, setGnpsViewerOpen] = useState(false);
+  const [gnpsFrameVersion, setGnpsFrameVersion] = useState(0);
+  const [engineStatus, setEngineStatus] = useState<EngineStatus>('checking');
+  const [themeSwitching, setThemeSwitching] = useState(false);
+  const themeAnimationTimer = useRef<number | null>(null);
+
+  function switchTheme(event: React.MouseEvent<HTMLButtonElement>) {
+    const nextTheme = theme === 'dark' ? 'light' : 'dark';
+    const rootElement = document.documentElement;
+    const buttonBounds = event.currentTarget.getBoundingClientRect();
+    const originX = buttonBounds.left + buttonBounds.width / 2;
+    const originY = buttonBounds.top + buttonBounds.height / 2;
+    const revealRadius = Math.hypot(
+      Math.max(originX, window.innerWidth - originX),
+      Math.max(originY, window.innerHeight - originY),
+    );
+    rootElement.style.setProperty('--theme-origin-x', `${originX}px`);
+    rootElement.style.setProperty('--theme-origin-y', `${originY}px`);
+    rootElement.style.setProperty('--theme-reveal-radius', `${revealRadius}px`);
+    rootElement.style.setProperty('--theme-reveal-color', nextTheme === 'light' ? '#edf7f8' : '#01050b');
+    if (themeAnimationTimer.current) window.clearTimeout(themeAnimationTimer.current);
+    setThemeSwitching(true);
+
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const transitionDocument = document as Document & {
+      startViewTransition?: (callback: () => void) => ThemeViewTransition;
+    };
+    if (stage !== 'upload' || reducedMotion || !transitionDocument.startViewTransition) {
+      rootElement.classList.add('theme-fallback-transition');
+      setTheme(nextTheme);
+      themeAnimationTimer.current = window.setTimeout(() => {
+        rootElement.classList.remove('theme-fallback-transition');
+        setThemeSwitching(false);
+      }, reducedMotion ? 0 : 760);
+      return;
+    }
+
+    const transition = transitionDocument.startViewTransition(() => {
+      rootElement.dataset.theme = nextTheme;
+      flushSync(() => setTheme(nextTheme));
+    });
+    transition.ready.then(() => {
+      rootElement.animate(
+        { clipPath: [
+          `circle(0px at ${originX}px ${originY}px)`,
+          `circle(${revealRadius}px at ${originX}px ${originY}px)`,
+        ] },
+        {
+          duration: 900,
+          easing: 'cubic-bezier(.16, 1, .3, 1)',
+          pseudoElement: '::view-transition-new(root)',
+        } as KeyframeAnimationOptions,
+      );
+    }).catch(() => undefined);
+    transition.finished.finally(() => {
+      setThemeSwitching(false);
+    });
+  }
 
   useEffect(() => { document.documentElement.dataset.theme = theme; localStorage.setItem('gnps2-theme', theme); }, [theme]);
+  useEffect(() => () => {
+    if (themeAnimationTimer.current) window.clearTimeout(themeAnimationTimer.current);
+    document.documentElement.classList.remove('theme-fallback-transition');
+  }, []);
+  useEffect(() => {
+    let active = true;
+    let request: AbortController | null = null;
+    const checkHealth = async () => {
+      request?.abort();
+      const controller = new AbortController(); request = controller;
+      const timeout = window.setTimeout(() => controller.abort(), 4000);
+      try {
+        const response = await fetch(apiUrl('/api/health'), { signal: controller.signal, cache: 'no-store' });
+        const payload = await response.json() as { ok?: boolean };
+        if (active) setEngineStatus(response.ok && payload.ok === true ? 'ready' : 'offline');
+      } catch { if (active) setEngineStatus('offline'); }
+      finally { window.clearTimeout(timeout); }
+    };
+    void checkHealth();
+    const interval = window.setInterval(() => void checkHealth(), 15_000);
+    const onVisibility = () => { if (document.visibilityState === 'visible') void checkHealth(); };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => { active = false; request?.abort(); window.clearInterval(interval); document.removeEventListener('visibilitychange', onVisibility); };
+  }, []);
   useEffect(() => {
     document.documentElement.classList.toggle('upload-snap', stage === 'upload');
     return () => document.documentElement.classList.remove('upload-snap');
@@ -173,9 +304,16 @@ export default function App() {
   }
 
   const filtered = useMemo(() => (result?.rows ?? []).filter((row) => {
-    const text = `${row.compoundName} ${row.adduct} ${row.molecularFormula}`.toLowerCase();
+    const text = `${row.compoundName} ${row.adduct} ${row.molecularFormula} ${Object.values(row.sourceMetadata ?? {}).join(' ')}`.toLowerCase();
     return text.includes(query.toLowerCase()) && (status === 'all' || (status === 'selected' ? row.selected : row.status === status));
   }), [result, query, status]);
+  const metadataColumns = useMemo(() => {
+    const present = new Set((result?.rows ?? []).flatMap((row) => Object.keys(row.sourceMetadata ?? {})));
+    const extras = [...present].filter((key) => !preferredMetadataColumns.includes(key as typeof preferredMetadataColumns[number])).sort((a,b)=>a.localeCompare(b));
+    return [...preferredMetadataColumns, ...extras];
+  }, [result]);
+  const compareUrl = result ? gnpsCompareUrl(result, gnpsUrl || taskUrl) : '';
+  const engineLabel = engineStatus === 'ready' ? 'Engine sẵn sàng' : engineStatus === 'checking' ? 'Đang kiểm tra' : 'Engine mất kết nối';
   const selectedCount = result?.rows.filter((row) => row.selected).length ?? 0;
   function update(id: string, patch: Partial<MatchRow>) { setResult((current) => current ? { ...current, rows: current.rows.map((row) => row.id === id ? { ...row, ...patch } : row) } : current); }
   function updateDetail(patch: Partial<MatchRow>) { if (!detailRow) return; update(detailRow.id, patch); setDetailRow({...detailRow,...patch}); }
@@ -187,48 +325,45 @@ export default function App() {
     catch(e){setError(e instanceof Error?e.message:'Không thể tra cứu PubChem.');} finally{setStructureLoading(false);}
   }
 
-  return <div className="app-shell">
-    <header className="topbar"><a className="brand" href="#" onClick={() => setStage('upload')}><span>{icons.flask}</span><div><strong>GNPS<span>2</span></strong><small>CONVERTER</small></div></a>
+  return <div className={`app-shell ${stage === 'upload' ? 'landing-shell' : ''}`}>
+    <header className={`topbar ${stage === 'upload' ? 'landing-topbar liquid-glass' : ''}`}><a className="brand" href="#" onClick={() => setStage('upload')}><span>{icons.flask}</span><div><strong>GNPS<span>2</span></strong><small>CONVERTER</small></div></a>
       <nav className="steps" aria-label="Tiến trình"><span className="active"><i>1</i> Dữ liệu</span><b/><span className={stage === 'results' ? 'active' : ''}><i>2</i> Đối sánh</span><b/><span className={stage === 'results' ? 'active' : ''}><i>3</i> Xuất báo cáo</span></nav>
-      <div className="top-actions"><div className="system-status"><i/> Engine sẵn sàng</div><button className="theme-toggle" onClick={()=>setTheme(theme==='dark'?'light':'dark')} aria-label={theme==='dark'?'Bật giao diện sáng':'Bật giao diện tối'} title={theme==='dark'?'Chế độ sáng':'Chế độ tối'}>{theme==='dark'?icons.sun:icons.moon}</button></div></header>
+      <div className="top-actions"><div className={`system-status ${engineStatus}`} title={engineStatus==='offline'?'Không kết nối được GNPS2 API':engineLabel}><i/> {engineLabel}</div><button className={`theme-toggle ${themeSwitching?'switching':''}`} onClick={switchTheme} disabled={themeSwitching} aria-label={theme==='dark'?'Bật giao diện sáng':'Bật giao diện tối'} aria-pressed={theme==='light'} title={theme==='dark'?'Chế độ sáng':'Chế độ tối'}><span className="theme-toggle-icon">{theme==='dark'?icons.sun:icons.moon}</span></button></div></header>
 
     <main>
       <AnimatePresence mode="wait">
       {stage === 'upload' ? <motion.div key="upload" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0, y: -15 }}>
-        <section className="hero"><Suspense fallback={<div className="scene-fallback"/>}><MoleculeScene/></Suspense><div className="hero-glow"/><div className="hero-copy">
-          <div className="eyebrow"><span>•</span> KHÔNG GIAN PHÂN TÍCH PHỔ KHỐI</div>
-          <h1>Biến dữ liệu phổ khối<br/>thành <em>báo cáo chuẩn xác.</em></h1>
-          <p>Đối sánh GNPS với dữ liệu thực nghiệm, kiểm duyệt trực quan và xuất báo cáo Word chỉ trong một quy trình.</p>
-          <div className="trust"><span>{icons.check} Kiểm soát sai số</span><span>{icons.check} Chỉnh sửa thủ công</span><span>{icons.check} Dữ liệu xử lý cục bộ</span></div>
-        </div></section>
-        <section className="workspace">
-          <div className="section-heading"><div><span className="index">01</span><div><h2>Nạp dữ liệu phân tích</h2><p>Dán link GNPS2 Task hoặc dùng hai file dữ liệu trên máy.</p></div></div><span className="secure">● SECURE SESSION</span></div>
+        <section className="landing-page"><div className="landing-scrim"/><div className="landing-vignette"/><Suspense fallback={null}><SciFiBackground theme={theme}/></Suspense><div className="landing-content">
+          <motion.p className="landing-tagline" initial={{opacity:0,y:10}} animate={{opacity:1,y:0}} transition={{delay:.1}}>MASS SPECTROMETRY ANALYTICAL WORKSPACE</motion.p>
+          <motion.h1 initial={{opacity:0,y:20}} animate={{opacity:1,y:0}} transition={{duration:1,ease:[.16,1,.3,1]}}><span className="headline-gradient headline-gradient-cyan">Đối sánh</span> dữ liệu <span className="headline-gradient headline-gradient-spectrum">phổ khối</span>.<br/>Tạo báo cáo <span className="headline-gradient headline-gradient-precision">chuẩn xác</span>.</motion.h1>
+          <motion.div className="landing-import liquid-glass" initial={{opacity:0,y:18,scale:.98}} animate={{opacity:1,y:0,scale:1}} transition={{delay:.32,duration:.7,ease:[.16,1,.3,1]}}>
           <div className="source-tabs"><motion.span className="tab-highlight" animate={{x:inputMode==='task'?'0%':'100%'}} transition={{type:'spring',stiffness:420,damping:34}}/><button className={inputMode==='task'?'active':''} onClick={()=>switchInputMode('task')}><b>Nhập link GNPS2</b></button><button className={inputMode==='files'?'active':''} onClick={()=>switchInputMode('files')}><b>Tải TSV + XLSX</b></button></div>
           <motion.div className="source-panels" animate={{height:panelHeights[inputMode]||'auto'}} transition={{duration:.36,ease:[.22,1,.36,1]}}>
           <motion.div className="source-track" animate={{x:inputMode==='task'?'0%':'-50%'}} transition={{duration:.48,ease:[.22,1,.36,1]}}>
           <div ref={taskPanelRef} className="task-import-card source-panel">
-            <div className="task-import-copy"><span>{icons.search}</span><div><strong>GNPS2 Task tự động</strong><small>Đọc tiêu đề, Library Matches, Network RT, fragments và cấu trúc phân tử.</small></div></div>
+            <div className="task-import-copy"><span>{icons.search}</span><div><strong>GNPS2 Task tự động</strong><small>Đọc Library Matches, RT, fragments và cấu trúc.</small></div></div>
             <label><span>LINK STATUS / RESULT / NETWORK</span><input type="url" value={taskUrl} onChange={(e)=>setTaskUrl(e.target.value)} placeholder="https://gnps2.org/status?task=..."/></label>
             <button className="primary" disabled={loading||!taskUrl.trim()} onClick={importTask}>{loading?<span className="spinner"/>:icons.flask}{loading?'Đang đọc GNPS2…':'Đọc dữ liệu GNPS2'}<small>→</small></button>
             <div className="task-stages"><span>1. Task & tiêu đề</span><i/> <span>2. Library Matches</span><i/> <span>3. Network & RT</span><i/> <span>4. Ảnh cấu trúc</span></div>
           </div><div ref={filesPanelRef} className="source-panel files-panel"><div className="file-import-controls">
             <div className="upload-grid"><FileDrop accept=".tsv" label="Kết quả định danh GNPS" hint="Kéo thả hoặc nhấn để chọn file TSV" file={tsv} onFile={selectTsv}/><div className="connector"><span>+</span></div><FileDrop accept=".xlsx" label="Dữ liệu thực nghiệm" hint="Kéo thả hoặc nhấn để chọn Data.xlsx" file={xlsx} onFile={selectXlsx}/></div>
             <label className="title-field"><span><b>TIÊU ĐỀ BÁO CÁO</b><small>Tự nhận diện từ tên file TSV — bạn có thể sửa lại</small></span><input value={reportTitle} onChange={(e)=>setReportTitle(e.target.value)} placeholder="Chọn file TSV để tự nhận diện tiêu đề" maxLength={160}/><i>{reportTitle.length}/160</i></label>
-            <div className="settings-card compact-action"><div className="settings-title"><span>{icons.tune}</span><div><strong>Đối chiếu theo tên hợp chất</strong><small>Compound_Name (TSV) ↔ library_compound_name (Excel), lấy tR từ rt_min</small></div></div><button className="primary" disabled={loading || !tsv || !xlsx || !reportTitle.trim()} onClick={() => analyze()}>{loading ? <span className="spinner"/> : icons.flask}{loading ? 'Đang đối chiếu…' : 'Bắt đầu đối chiếu'}<small>→</small></button></div>
+            <div className="settings-card compact-action"><div className="settings-title"><span>{icons.tune}</span><div><strong>Đối chiếu theo tên hợp chất</strong><small>Compound_Name ↔ library_compound_name, lấy tR từ rt_min</small></div></div><button className="primary" disabled={loading || !tsv || !xlsx || !reportTitle.trim()} onClick={() => analyze()}>{loading ? <span className="spinner"/> : icons.flask}{loading ? 'Đang đối chiếu…' : 'Bắt đầu đối chiếu'}<small>→</small></button></div>
             </div>
           </div></motion.div></motion.div>{error && <div className="alert">{error}</div>}
-        </section>
+          </motion.div><motion.div className="landing-assurance" initial={{opacity:0}} animate={{opacity:1}} transition={{delay:.75}}><span>{icons.check} Kiểm soát sai số</span><span>{icons.check} Chỉnh sửa thủ công</span><span>{icons.check} Dữ liệu xử lý cục bộ</span></motion.div>
+        </div></section>
       </motion.div> : result && <motion.section key="results" className="results-page" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
-        <div className="results-head"><div><button className="back" onClick={() => setStage('upload')}>← Dữ liệu đầu vào</button><label className="result-title-label">TIÊU ĐỀ BÁO CÁO<input value={reportTitle} onChange={(e)=>setReportTitle(e.target.value)} maxLength={160}/></label><p>Kiểm tra, hiệu chỉnh và chọn các hợp chất trước khi xuất báo cáo.</p></div><div className="export-actions">{result.source!=='gnps-task'&&<><button className={viewerTarget==='tsv'?'viewer-action active':''} disabled={!tsv} onClick={()=>setViewerTarget(viewerTarget==='tsv'?null:'tsv')}>{icons.file} Xem TSV</button><button className={viewerTarget==='xlsx'?'viewer-action active':''} disabled={!xlsx} onClick={()=>setViewerTarget(viewerTarget==='xlsx'?null:'xlsx')}>{icons.file} Xem XLSX</button><button onClick={()=>{setHeaders({tsv:result.tsvHeaders,excel:result.excelHeaders});setMapping(result.mapping);setMappingOpen(true)}}>{icons.tune} Ánh xạ lại</button></>}<button onClick={() => doExport('xlsx')} disabled={!!exporting}>{icons.download} {exporting === 'xlsx' ? 'Đang tạo…' : 'Xuất Excel'}</button><button className="primary" onClick={() => doExport('docx')} disabled={!!exporting || !reportTitle.trim()}>{icons.download} {exporting === 'docx' ? 'Đang tạo…' : 'Xuất Word'}</button></div></div>
+        <div className="results-head"><div><button className="back" onClick={() => setStage('upload')}>← Dữ liệu đầu vào</button><label className="result-title-label">TIÊU ĐỀ BÁO CÁO<input value={reportTitle} onChange={(e)=>setReportTitle(e.target.value)} maxLength={160}/></label><p>Kiểm tra, hiệu chỉnh và chọn các hợp chất trước khi xuất báo cáo.</p></div><div className="export-actions">{result.source!=='gnps-task'&&<><button className={viewerTarget==='tsv'?'viewer-action active':''} disabled={!tsv} onClick={()=>{setGnpsViewerOpen(false);setViewerTarget(viewerTarget==='tsv'?null:'tsv')}}>{icons.file} Xem TSV</button><button className={viewerTarget==='xlsx'?'viewer-action active':''} disabled={!xlsx} onClick={()=>{setGnpsViewerOpen(false);setViewerTarget(viewerTarget==='xlsx'?null:'xlsx')}}>{icons.file} Xem XLSX</button><button onClick={()=>{setHeaders({tsv:result.tsvHeaders,excel:result.excelHeaders});setMapping(result.mapping);setMappingOpen(true)}}>{icons.tune} Ánh xạ lại</button></>}<button className={gnpsViewerOpen?'viewer-action active':'viewer-action'} disabled={!compareUrl} onClick={()=>{setViewerTarget(null);setGnpsViewerOpen(value=>!value)}}>{icons.external} Đối chiếu GNPS</button><button onClick={() => doExport('xlsx')} disabled={!!exporting}>{icons.download} {exporting === 'xlsx' ? 'Đang tạo…' : 'Xuất Excel'}</button><button className="primary" onClick={() => doExport('docx')} disabled={!!exporting || !reportTitle.trim()}>{icons.download} {exporting === 'docx' ? 'Đang tạo…' : 'Xuất Word'}</button></div></div>
         <div className="gnps-card"><div><strong>Ảnh cấu trúc từ GNPS2</strong><small>Dán URL trang Library Matches. Không tìm thấy cấu trúc sẽ để trống.</small></div><input type="url" value={gnpsUrl} onChange={(e)=>setGnpsUrl(e.target.value)} placeholder="https://gnps2.org/result?task=...&viewname=librarymatches"/><button onClick={resolveStructures} disabled={structureLoading||!gnpsUrl.trim()}>{structureLoading?<span className="spinner"/>:icons.flask}{structureLoading?'Đang lấy ảnh…':'Lấy ảnh GNPS2'}</button></div>
         {structureMessage&&<motion.div className="notice" initial={{opacity:0,y:-8}} animate={{opacity:1,y:0}}><span>{icons.check}</span><p>{structureMessage}</p><button onClick={()=>setStructureMessage('')} aria-label="Đóng thông báo">{icons.close}</button></motion.div>}{error&&<div className="alert">{error}</div>}
         <div className="stats"><article><small>DÒNG TSV</small><strong>{result.summary.tsvRows}</strong><span>Dữ liệu nguồn</span></article><article><small>ĐÃ ĐỐI CHIẾU</small><strong>{result.summary.matched}</strong><span className="green">✓ Tìm thấy tên</span></article><article><small>CHƯA KHỚP</small><strong>{result.summary.unmatched}</strong><span>Không tìm thấy tên Excel</span></article><article><small>CẦN DUYỆT</small><strong>{result.rows.filter(r=>r.status==='ambiguous').length}</strong><span className="amber">Nhiều tên tương ứng</span></article><article><small>ĐÃ CHỌN</small><strong>{selectedCount}</strong><span>Sẽ đưa vào báo cáo</span></article></div>
-        <div className={`results-workbench ${viewerTarget?'viewer-open':''}`}><div className="data-card"><div className="table-tools"><div className="search">{icons.search}<input placeholder="Tìm hoạt chất, ion, công thức…" value={query} onChange={(e)=>setQuery(e.target.value)}/></div><div className="filters">{(['all','matched','ambiguous','unmatched','selected'] as const).map(value=><button className={status===value?'active':''} onClick={()=>setStatus(value)} key={value}>{{all:'Tất cả',matched:'Khớp',ambiguous:'Cần duyệt',unmatched:'Chưa có RT',selected:'Đã chọn'}[value]}</button>)}</div><span className="result-count">{filtered.length} kết quả</span></div>
-          <div className="table-wrap"><table><thead><tr><th><input type="checkbox" checked={selectedCount===result.rows.length && !!selectedCount} onChange={(e)=>setResult({...result,rows:result.rows.map(r=>({...r,selected:e.target.checked}))})}/></th><th>STT</th><th>tR (min)</th><th>Tên hoạt chất dự đoán</th><th>Ion</th><th>Ion tiền chất (m/z)</th><th>Mảnh vỡ (m/z)</th><th>Công thức phân tử (sai số ppm)</th><th>Cấu trúc phân tử</th></tr></thead><tbody>
-            {filtered.map((row,index)=><tr key={row.id} className={!row.selected?'muted':''}><td><input type="checkbox" checked={row.selected} onChange={(e)=>update(row.id,{selected:e.target.checked})}/></td><td className="mono faint">{index+1}</td><td className="rt-cell"><input className="cell-input mono" value={row.rtDisplay} onChange={(e)=>update(row.id,{rtDisplay:e.target.value})}/></td><td className="wrapping-cell compound-cell"><textarea className="cell-input wrapping-input compound" rows={1} value={row.compoundName} onChange={(e)=>update(row.id,{compoundName:e.target.value})}/></td><td><input className="cell-input mono" value={row.adduct} onChange={(e)=>update(row.id,{adduct:e.target.value})}/></td><td><input className="cell-input mono" type="number" step="any" value={row.mzTsv} onChange={(e)=>update(row.id,{mzTsv:Number(e.target.value)})}/></td><td className="wrapping-cell fragments-cell"><textarea className="cell-input wrapping-input" rows={1} value={row.fragments} placeholder="—" onChange={(e)=>update(row.id,{fragments:e.target.value})}/></td><td className="formula-cell"><input className="cell-input mono formula-value" value={row.molecularFormula} onChange={(e)=>update(row.id,{molecularFormula:e.target.value})}/><label className="ppm-editor"><input className="cell-input mono" type="number" step="any" value={row.reportedMzErrorPpm ?? ''} placeholder="—" onChange={(e)=>update(row.id,{reportedMzErrorPpm:e.target.value===''?null:Number(e.target.value)})}/><span>ppm</span></label></td><td className="structure-cell">{row.structureData?<button className="structure-preview" type="button" onClick={()=>setDetailRow(row)} aria-label={`Xem chi tiết ${row.compoundName}`}><img src={row.structureData} alt={`Cấu trúc ${row.compoundName}`}/><small>Xem chi tiết</small></button>:<span>Chưa tra cứu</span>}</td></tr>)}
+        <div className={`results-workbench ${viewerTarget||gnpsViewerOpen?'viewer-open':''}`}><div className="data-card"><div className="table-tools"><div className="search">{icons.search}<input placeholder="Tìm trong tất cả trường dữ liệu…" value={query} onChange={(e)=>setQuery(e.target.value)}/></div><div className="filters">{(['all','matched','ambiguous','unmatched','selected'] as const).map(value=><button className={status===value?'active':''} onClick={()=>setStatus(value)} key={value}>{{all:'Tất cả',matched:'Khớp',ambiguous:'Cần duyệt',unmatched:'Chưa có RT',selected:'Đã chọn'}[value]}</button>)}</div><span className="result-count">{filtered.length} kết quả · {metadataColumns.length} trường nguồn</span></div>
+          <div className="table-wrap result-table-wrap"><table className="result-table"><thead><tr><th className="sticky-select"><input type="checkbox" checked={selectedCount===result.rows.length && !!selectedCount} onChange={(e)=>setResult({...result,rows:result.rows.map(r=>({...r,selected:e.target.checked}))})}/></th><th className="sticky-index"><span className="table-heading-vn">STT</span><small>Số thứ tự</small></th><th><span className="table-heading-vn">Thời gian lưu</span><small>tR (min)</small></th><th className="sticky-compound"><span className="table-heading-vn">Tên hoạt chất dự đoán</span><small>Compound name</small></th><th><span className="table-heading-vn">Ion / chất cộng</span><small>Ion / adduct</small></th><th><span className="table-heading-vn">Ion tiền chất</span><small>Precursor m/z</small></th><th><span className="table-heading-vn">Mảnh vỡ</span><small>Fragments (m/z)</small></th><th><span className="table-heading-vn">Công thức phân tử</span><small>Molecular formula · ppm</small></th><th><span className="table-heading-vn">Cấu trúc phân tử</span><small>Structure</small></th>{metadataColumns.map(column=><th className="metadata-heading" key={column} title={column}><span className="table-heading-vn">{metadataHeaderLabel(column)}</span><small>{column}</small></th>)}</tr></thead><tbody>
+            {filtered.map((row,index)=><tr key={row.id} className={!row.selected?'muted':''}><td className="sticky-select"><input type="checkbox" checked={row.selected} onChange={(e)=>update(row.id,{selected:e.target.checked})}/></td><td className="mono faint sticky-index">{index+1}</td><td className="rt-cell"><input className="cell-input mono" value={row.rtDisplay} onChange={(e)=>update(row.id,{rtDisplay:e.target.value})}/></td><td className="wrapping-cell compound-cell sticky-compound"><textarea className="cell-input wrapping-input compound" rows={1} value={row.compoundName} onChange={(e)=>update(row.id,{compoundName:e.target.value})}/></td><td><input className="cell-input mono" value={row.adduct} onChange={(e)=>update(row.id,{adduct:e.target.value})}/></td><td><input className="cell-input mono" type="number" step="any" value={row.mzTsv} onChange={(e)=>update(row.id,{mzTsv:Number(e.target.value)})}/></td><td className="wrapping-cell fragments-cell"><textarea className="cell-input wrapping-input" rows={1} value={row.fragments} placeholder="—" onChange={(e)=>update(row.id,{fragments:e.target.value})}/></td><td className="formula-cell"><input className="cell-input mono formula-value" value={row.molecularFormula} onChange={(e)=>update(row.id,{molecularFormula:e.target.value})}/><label className="ppm-editor"><input className="cell-input mono" type="number" step="any" value={row.reportedMzErrorPpm ?? ''} placeholder="—" onChange={(e)=>update(row.id,{reportedMzErrorPpm:e.target.value===''?null:Number(e.target.value)})}/><span>ppm</span></label></td><td className="structure-cell">{row.structureData?<button className="structure-preview" type="button" onClick={()=>setDetailRow(row)} aria-label={`Xem chi tiết ${row.compoundName}`}><img src={row.structureData} alt={`Cấu trúc ${row.compoundName}`}/><small>Xem chi tiết</small></button>:<span>Chưa tra cứu</span>}</td>{metadataColumns.map(column=><MetadataCell key={column} value={row.sourceMetadata?.[column]}/>)}</tr>)}
           </tbody></table>{!filtered.length&&<div className="empty">Không có kết quả phù hợp bộ lọc.</div>}</div>
           <div className="table-footer"><span><b>{selectedCount}</b>/{result.rows.length} dòng được chọn</span><span>{result.source==='gnps-task'?'GNPS2 Library #Scan# · tR lấy từ ': 'Đối chiếu tên hợp chất · tR lấy từ '}<b>{result.source==='gnps-task'?'Network GraphML.rt_min':'Excel.rt_min'}</b></span></div>
-        </div>{viewerTarget&&<motion.aside className="result-file-viewer" initial={{opacity:0,x:28}} animate={{opacity:1,x:0}} exit={{opacity:0,x:20}}><FileViewer key={viewerTarget} initialActive={viewerTarget} files={{tsv,xlsx}} previews={previews} onSheet={(sheet)=>xlsx&&void loadPreview(xlsx,'xlsx',sheet)} onClose={()=>setViewerTarget(null)}/></motion.aside>}</div>
+        </div>{viewerTarget&&<motion.aside className="result-file-viewer" initial={{opacity:0,x:28}} animate={{opacity:1,x:0}} exit={{opacity:0,x:20}}><FileViewer key={viewerTarget} initialActive={viewerTarget} files={{tsv,xlsx}} previews={previews} onSheet={(sheet)=>xlsx&&void loadPreview(xlsx,'xlsx',sheet)} onClose={()=>setViewerTarget(null)}/></motion.aside>}{gnpsViewerOpen&&compareUrl&&<motion.aside className="result-file-viewer gnps-web-viewer" initial={{opacity:0,x:28}} animate={{opacity:1,x:0}} exit={{opacity:0,x:20}}><section className="gnps-web-panel" aria-label="Đối chiếu dữ liệu trên GNPS"><header><div><small>ĐỐI CHIẾU TRỰC TIẾP</small><strong>GNPS2 Library Matches</strong><span title={compareUrl}>{compareUrl}</span></div><div className="gnps-web-actions"><button type="button" title="Sao chép liên kết" aria-label="Sao chép liên kết GNPS" onClick={()=>void navigator.clipboard?.writeText(compareUrl)}>{icons.copy}</button><button type="button" title="Tải lại" aria-label="Tải lại trang GNPS" onClick={()=>setGnpsFrameVersion(value=>value+1)}>{icons.refresh}</button><a href={compareUrl} target="_blank" rel="noopener noreferrer" title="Mở trong tab mới" aria-label="Mở GNPS trong tab mới">{icons.external}</a><button type="button" title="Đóng" aria-label="Đóng ngăn GNPS" onClick={()=>setGnpsViewerOpen(false)}>{icons.close}</button></div></header><div className="gnps-frame-wrap"><iframe key={gnpsFrameVersion} src={compareUrl} title="GNPS2 Library Matches" referrerPolicy="no-referrer" sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-same-origin"/><div className="gnps-frame-help"><span>Nếu GNPS không cho phép nhúng trang này,</span><a href={compareUrl} target="_blank" rel="noopener noreferrer">mở GNPS trong tab mới {icons.external}</a></div></div></section></motion.aside>}</div>
       </motion.section>}
       </AnimatePresence>
     </main>

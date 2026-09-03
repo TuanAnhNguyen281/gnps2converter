@@ -1,8 +1,11 @@
+export type SourceMetadata = Record<string, string | number | null>;
+
 export interface MatchRow {
   id: string; selected: boolean; sourceTsvRow: number; sourceXlsxRow: number;
   compoundName: string; adduct: string; mzTsv: number; mzData: number; rtTsv: number; rtData: number; rtDisplay: string;
   deltaDa: number; deltaPpm: number; deltaRt: number; candidateCount: number;
   molecularFormula: string; fragments: string; reportedMzErrorPpm: number | null;
+  sourceMetadata: SourceMetadata;
   status: 'matched' | 'ambiguous' | 'unmatched'; structureUrl?: string; structureData?: string;
 }
 

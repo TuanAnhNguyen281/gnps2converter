@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { extractGnpsTaskId, formatMirrorFragments, parseMgfFragments, parseNetworkGraphml, parseTaskStatus } from './gnps-task.js';
+import { extractGnpsTaskId, formatMirrorFragments, normalizeSourceMetadata, parseMgfFragments, parseNetworkGraphml, parseTaskStatus } from './gnps-task.js';
 
 const task = '2515573ac8c24ec8b85f553aad9b440e';
 
@@ -31,5 +31,10 @@ describe('GNPS2 task importer', () => {
     ];
     expect(formatMirrorFragments({ data, selected_rows: [1] })).toBe('135 (100)');
     expect(formatMirrorFragments({ data, selected_rows: [0, 2] })).toBe('135, 179');
+  });
+
+  it('keeps all library metadata, including null and structured values', () => {
+    expect(normalizeSourceMetadata({ SpectrumID: 'CCMSLIB00006679405', CAS_Number: null, tags: ['bronze'] }))
+      .toEqual({ SpectrumID: 'CCMSLIB00006679405', CAS_Number: null, tags: '["bronze"]' });
   });
 });

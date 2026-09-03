@@ -1,6 +1,7 @@
 export type MzMode = 'ppm' | 'da';
 
 export interface RawRow { [key: string]: string | number | null | undefined }
+export type SourceMetadata = Record<string, string | number | null>;
 
 export interface ColumnMapping {
   compoundName: string;
@@ -38,6 +39,7 @@ export interface MatchRow {
   molecularFormula: string;
   fragments: string;
   reportedMzErrorPpm: number | null;
+  sourceMetadata: SourceMetadata;
   status: 'matched' | 'ambiguous' | 'unmatched';
   structureUrl?: string;
   structureData?: string;

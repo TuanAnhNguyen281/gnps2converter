@@ -41,6 +41,10 @@ function text(row: RawRow, key: string): string {
   return value == null ? '' : String(value).trim();
 }
 
+function sourceMetadata(row: RawRow) {
+  return Object.fromEntries(Object.entries(row).map(([key, value]) => [key, value ?? null]));
+}
+
 export function matchRows(
   tsvRows: RawRow[],
   dataRows: RawRow[],
@@ -87,6 +91,7 @@ export function matchRows(
       deltaDa: 0, deltaPpm: 0, deltaRt: 0,
       candidateCount: candidates.length, molecularFormula: text(source, mapping.formula),
       fragments: text(source, mapping.fragments), reportedMzErrorPpm: parseNumber(source[mapping.reportedPpm]),
+      sourceMetadata: sourceMetadata(source),
       status: !best ? 'unmatched' : candidates.length > 1 ? 'ambiguous' : 'matched',
     });
   });

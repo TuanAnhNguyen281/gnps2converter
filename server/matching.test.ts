@@ -23,6 +23,7 @@ describe('matching engine', () => {
     expect(output.rows[0].sourceXlsxRow).toBe(3);
     expect(output.rows[0].candidateCount).toBe(2);
     expect(output.rows[0].rtDisplay).toBe('3.1');
+    expect(output.rows[0].sourceMetadata).toMatchObject({ Compound_Name: 'Glutamic acid', Precursor_MZ: 190.07, Adduct: '[M-H]-' });
   });
   it('keeps every TSV row and leaves RT blank when Excel has no matching name', () => {
     const output = matchRows(
@@ -35,5 +36,6 @@ describe('matching engine', () => {
     expect(output.rows[0].rtDisplay).toBe('');
     expect(output.matched).toBe(0);
     expect(output.unmatched).toBe(1);
+    expect(output.rows[0].sourceMetadata).toMatchObject({ Compound_Name: 'Unknown compound', Precursor_MZ: 123.45 });
   });
 });

@@ -199,12 +199,18 @@ function formatNumber(value: unknown, digits = 3) {
   return Number.isFinite(number) ? number.toLocaleString('vi-VN', { maximumFractionDigits: digits }) : '';
 }
 
-function formatMolecularFormula(value: unknown) {
-  const subscripts: Record<string, string> = {
-    '0': '₀', '1': '₁', '2': '₂', '3': '₃', '4': '₄',
-    '5': '₅', '6': '₆', '7': '₇', '8': '₈', '9': '₉',
-  };
-  return String(value ?? '').replace(/\d/g, (digit) => subscripts[digit]);
+function molecularFormulaText(value: unknown) {
+  return String(value ?? '').trim();
+}
+
+/** Build native Word subscript runs; digits keep the same font size. */
+function molecularFormulaRuns(value: unknown, size = 20) {
+  return molecularFormulaText(value)
+    .split(/(\d+)/)
+    .filter(Boolean)
+    .map((part) => /^\d+$/.test(part)
+      ? new TextRun({ text: part, size, subScript: true })
+      : new TextRun({ text: part, size }));
 }
 
 function reportRows(input: Record<string, unknown>[]) {
@@ -214,7 +220,7 @@ function reportRows(input: Record<string, unknown>[]) {
   return input.filter((row) => row.selected !== false).map((row, index) => ({
     stt: index + 1, rt: String(row.rtDisplay ?? formatNumber(row.rtTsv ?? row.rtData, 3)).replace('.', ','), ten_hoat_chat: String(row.compoundName ?? ''),
     ion: String(row.adduct ?? ''), mz_precursor: formatNumber(row.mzTsv, 5),
-    mz_fragments: String(row.fragments ?? ''), cong_thuc: formatMolecularFormula(row.molecularFormula),
+    mz_fragments: String(row.fragments ?? ''), cong_thuc: molecularFormulaText(row.molecularFormula),
     sai_so_ppm: formatNumber(row.reportedMzErrorPpm ?? row.deltaPpm, 5),
     cau_truc: String(row.structureData || blankStructure),
   }));
@@ -228,9 +234,11 @@ async function fallbackDocx(rows: ReturnType<typeof reportRows>, title: string) 
       shading: { fill: 'D9EEF2' }, borders: { top: borders, bottom: borders, left: borders, right: borders },
       children: [new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: value, bold: true, color: '083344' })] })],
     })) }),
-    ...rows.map((row) => new TableRow({ children: [row.stt, row.rt, row.ten_hoat_chat, row.ion, row.mz_precursor, row.mz_fragments, row.cong_thuc, row.sai_so_ppm].map((value) => new TableCell({
+    ...rows.map((row) => new TableRow({ children: [row.stt, row.rt, row.ten_hoat_chat, row.ion, row.mz_precursor, row.mz_fragments, row.cong_thuc, row.sai_so_ppm].map((value, columnIndex) => new TableCell({
       borders: { top: borders, bottom: borders, left: borders, right: borders },
-      children: [new Paragraph({ children: [new TextRun({ text: String(value), size: 20 })] })],
+      children: [new Paragraph({ children: columnIndex === 6
+        ? molecularFormulaRuns(value)
+        : [new TextRun({ text: String(value), size: 20 })] })],
     })) })),
   ];
   const document = new Document({ sections: [{ children: [
@@ -239,6 +247,50 @@ async function fallbackDocx(rows: ReturnType<typeof reportRows>, title: string) 
     new Paragraph(''), new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows: tableRows }),
   ] }] });
   return Packer.toBuffer(document);
+}
+
+function escapeXml(value: string) {
+  return value.replace(/[<>&'\"]/g, (character) => ({
+    '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;',
+  }[character] ?? character));
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Carbone fills template placeholders as plain text. Convert those formula
+ * runs in the generated OOXML so template exports use native Word subscripts.
+ */
+async function injectFormulaSubscripts(docx: Buffer, rows: ReturnType<typeof reportRows>) {
+  const zip = await JSZip.loadAsync(docx);
+  const documentPart = zip.file('word/document.xml');
+  if (!documentPart) return docx;
+  let documentXml = await documentPart.async('string');
+
+  for (const row of rows) {
+    const formula = molecularFormulaText(row.cong_thuc);
+    if (!formula || !/\d/.test(formula)) continue;
+    const escapedFormula = escapeXml(formula);
+    const formulaPattern = escapeRegExp(escapedFormula);
+    const runPattern = new RegExp(`(<w:r(?:\\s[^>]*)?>\\s*)(<w:rPr>(?:(?!<\\/w:r>)[\\s\\S])*?<\\/w:rPr>\\s*)?(<w:t(?:\\s[^>]*)?>)${formulaPattern}(</w:t>)(</w:r>)`);
+    documentXml = documentXml.replace(runPattern, (_match, runOpen: string, runProperties: string | undefined, textOpen: string, _textClose: string, runClose: string) => {
+      const baseProperties = runProperties ?? '';
+      return formula.split(/(\d+)/).filter(Boolean).map((part) => {
+        let properties = baseProperties;
+        if (/^\d+$/.test(part)) {
+          properties = properties
+            ? properties.replace('</w:rPr>', '<w:vertAlign w:val="subscript"/></w:rPr>')
+            : '<w:rPr><w:vertAlign w:val="subscript"/></w:rPr>';
+        }
+        return `${runOpen}${properties}${textOpen}${escapeXml(part)}</w:t>${runClose}`;
+      }).join('');
+    });
+  }
+
+  zip.file('word/document.xml', documentXml);
+  return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
 }
 
 async function injectStructureImages(docx: Buffer, rows: ReturnType<typeof reportRows>) {
@@ -279,6 +331,7 @@ app.post('/api/export/docx', async (request, response, next) => {
       output = await new Promise((resolve, reject) => carbone.render(template, { title, rows }, (error, result) => error ? reject(error) : resolve(result)));
       output = await injectStructureImages(output, rows);
     } else output = await fallbackDocx(rows, title);
+    output = await injectFormulaSubscripts(output, rows);
     const name = safeName(body.fileName ?? title);
     response.set({ 'Content-Type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'Content-Disposition': contentDisposition(`${name}.docx`) });
     response.send(output);
@@ -343,16 +396,40 @@ app.post('/api/export/xlsx', async (request, response, next) => {
   try {
     const body = exportSchema.parse(request.body);
     const rows = reportRows(body.rows);
+    const selectedRows = body.rows.filter((row) => row.selected !== false);
+    const preferredMetadata = [
+      'SpectrumID', '#Scan#', 'SpectrumFile', 'LibraryName', 'MQScore', 'TIC_Query', 'RT_Query', 'MZErrorPPM',
+      'SharedPeaks', 'MassDiff', 'SpecMZ', 'SpecCharge', 'FileScanUniqueID', 'NumberHits', 'Compound_Name',
+      'Ion_Source', 'Instrument', 'Compound_Source', 'PI', 'Data_Collector', 'Adduct', 'Precursor_MZ', 'ExactMass',
+      'Charge', 'CAS_Number', 'Pubmed_ID', 'Smiles', 'INCHI', 'INCHI_AUX', 'Library_Class', 'IonMode', 'Organism',
+      'LibMZ', 'UpdateWorkflowName', 'LibraryQualityString', 'tags', 'molecular_formula', 'InChIKey', 'InChIKey-Planar',
+      'superclass', 'class', 'subclass', 'npclassifier_superclass', 'npclassifier_class', 'npclassifier_pathway', 'library_usi',
+    ];
+    const presentKeys = new Set(selectedRows.flatMap((row) => {
+      const metadata = row.sourceMetadata;
+      return metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? Object.keys(metadata) : [];
+    }));
+    const metadataKeys = [
+      ...preferredMetadata.filter((key) => presentKeys.has(key)),
+      ...[...presentKeys].filter((key) => !preferredMetadata.includes(key)).sort((a, b) => a.localeCompare(b)),
+    ];
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Report');
-    sheet.columns = [
+    const reportColumns = [
       ['STT', 'stt', 8], ['RT', 'rt', 12], ['Tên hoạt chất', 'ten_hoat_chat', 32], ['Ion', 'ion', 16],
       ['m/z precursor', 'mz_precursor', 18], ['m/z fragments', 'mz_fragments', 28], ['Công thức', 'cong_thuc', 18], ['Sai số ppm', 'sai_so_ppm', 16],
-    ].map(([header, key, width]) => ({ header, key, width })) as ExcelJS.Column[];
-    rows.forEach((row) => sheet.addRow(row));
+    ].map(([header, key, width]) => ({ header, key, width }));
+    const metadataColumns = metadataKeys.map((header, index) => ({ header, key: `metadata_${index}`, width: Math.min(45, Math.max(14, header.length + 3)) }));
+    sheet.columns = [...reportColumns, ...metadataColumns] as ExcelJS.Column[];
+    rows.forEach((row, rowIndex) => {
+      const metadata = selectedRows[rowIndex]?.sourceMetadata;
+      const source = metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata as Record<string, unknown> : {};
+      sheet.addRow({ ...row, ...Object.fromEntries(metadataKeys.map((key, index) => [`metadata_${index}`, source[key] ?? null])) });
+    });
     sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
     sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF075985' } };
-    sheet.views = [{ state: 'frozen', ySplit: 1 }]; sheet.autoFilter = `A1:H${Math.max(1, rows.length + 1)}`;
+    sheet.views = [{ state: 'frozen', ySplit: 1 }];
+    sheet.autoFilter = { from: { row: 1, column: 1 }, to: { row: Math.max(1, rows.length + 1), column: Math.max(1, sheet.columnCount) } };
     const output = await workbook.xlsx.writeBuffer();
     const name = safeName(body.fileName ?? body.title ?? `GNPS2_Data_${new Date().toISOString().slice(0, 10)}`);
     response.set({ 'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'Content-Disposition': contentDisposition(`${name}.xlsx`) });
