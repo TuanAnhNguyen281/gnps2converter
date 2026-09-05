@@ -1409,11 +1409,51 @@ th:nth-child(3) {
 }
 .result-table td > input.cell-input,.result-table td > textarea.cell-input { text-align:center; }
 .result-table thead th { white-space:normal; line-height:1.25; }
+.result-table thead th.sortable-column { padding-right:38px; }
+.result-table thead th.sortable-column:focus-within { z-index:20; }
 .result-table thead th > small,.result-table thead th > .table-heading-vn { display:block; }
 .result-table thead th > .table-heading-vn { font-size:9px; font-weight:700; }
 .result-table thead th > small { margin-top:4px; color:#71929d; font:8px "DM Mono"; letter-spacing:.2px; }
 .result-table .metadata-heading { text-align:center; }
 .result-table thead .sticky-index small { display:none; }
+.column-filter-trigger {
+  position:absolute;
+  top:50%;
+  right:7px;
+  width:25px;
+  height:25px;
+  display:grid;
+  place-items:center;
+  padding:5px;
+  transform:translateY(-50%);
+  border:1px solid transparent;
+  border-radius:5px;
+  background:transparent;
+  color:#66838d;
+}
+.column-filter-trigger:hover,.column-filter-trigger:focus-visible { border-color:#32616c; background:#132e38; color:#a7d1d5; }
+.column-filter-trigger.active { border-color:#369aa5; background:#16414a; color:#75e1df; }
+.column-filter-trigger svg { width:13px; height:13px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linejoin:round; }
+.column-filter-trigger > span { position:absolute; right:1px; bottom:-2px; color:var(--cyan); font:700 9px "DM Mono"; }
+.column-filter-menu {
+  position:absolute;
+  z-index:30;
+  top:calc(100% + 5px);
+  right:6px;
+  width:178px;
+  overflow:hidden;
+  padding:5px;
+  border:1px solid #31535e;
+  border-radius:8px;
+  background:#0b2029;
+  box-shadow:0 14px 32px #000a;
+  text-align:left;
+  text-transform:none;
+}
+.column-filter-menu button { width:100%; display:flex; align-items:center; gap:9px; padding:9px 10px; border:0; border-radius:5px; background:transparent; color:#abc4ca; font-size:10px; text-align:left; }
+.column-filter-menu button:hover,.column-filter-menu button:focus-visible,.column-filter-menu button.active { background:#173b45; color:#d5f5f4; }
+.column-filter-menu button b { width:15px; color:#60c8ca; font:700 12px "DM Mono"; text-align:center; }
+.column-filter-menu button.clear-sort { margin-top:4px; border-top:1px solid #28434c; border-radius:0 0 5px 5px; color:#839fa6; }
 .result-table tbody tr td { background:#081821; }
 .result-table tbody tr:nth-child(even) td { background:#0a1e27; }
 .result-table tbody tr:nth-child(even) .sticky-select,.result-table tbody tr:nth-child(even) .sticky-index,.result-table tbody tr:nth-child(even) .sticky-compound { background:#0c242d; }
@@ -1486,6 +1526,13 @@ th:nth-child(3) {
 [data-theme="light"] .result-table tbody tr:nth-child(even) td { background:#f6fafb; }
 [data-theme="light"] .result-table tbody tr:nth-child(even) .sticky-select,[data-theme="light"] .result-table tbody tr:nth-child(even) .sticky-index,[data-theme="light"] .result-table tbody tr:nth-child(even) .sticky-compound { background:#e8f2f4; }
 [data-theme="light"] .result-table thead th > small { color:#62828b; }
+[data-theme="light"] .column-filter-trigger { color:#62818a; }
+[data-theme="light"] .column-filter-trigger:hover,[data-theme="light"] .column-filter-trigger:focus-visible { border-color:#9ec5ca; background:#dcecef; color:#285f68; }
+[data-theme="light"] .column-filter-trigger.active { border-color:#55a8b0; background:#cae9eb; color:#0a727c; }
+[data-theme="light"] .column-filter-menu { border-color:#b7d1d6; background:#fff; box-shadow:0 14px 30px #315a6638; }
+[data-theme="light"] .column-filter-menu button { color:#3f626b; }
+[data-theme="light"] .column-filter-menu button:hover,[data-theme="light"] .column-filter-menu button:focus-visible,[data-theme="light"] .column-filter-menu button.active { background:#e2f1f3; color:#174b54; }
+[data-theme="light"] .column-filter-menu button.clear-sort { border-top-color:#d3e3e6; color:#66838a; }
 [data-theme="light"] .result-table th:first-child,[data-theme="light"] .result-table td:first-child { border-left:0; }
 [data-theme="light"] .metadata-cell > button { border-color:#b8d4d9; background:#f4fafb; color:#487e87; }
 [data-theme="light"] .gnps-web-panel { border-color:#bad7dc; background:#f8fcfd; box-shadow:0 22px 55px #315a6626; }

@@ -16,6 +16,7 @@ const icons = {
   check: <svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg>,
   download: <svg viewBox="0 0 24 24"><path d="M12 3v12m0 0 5-5m-5 5-5-5M5 20h14"/></svg>,
   search: <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m16 16 5 5"/></svg>,
+  filter: <svg viewBox="0 0 24 24"><path d="M4 6h16l-6.5 7.2V19l-3 1v-6.8z"/></svg>,
   sun: <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M2 12h2m16 0h2M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42"/></svg>,
   moon: <svg viewBox="0 0 24 24"><path d="M20 15.4A8.5 8.5 0 0 1 8.6 4a8.5 8.5 0 1 0 11.4 11.4Z"/></svg>,
   close: <svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg>,
@@ -28,6 +29,9 @@ type Stage = 'upload' | 'results';
 type PreviewKind = 'tsv' | 'xlsx';
 type PreviewStatus = { data: FilePreview | null; loading: boolean; error: string };
 type ThemeViewTransition = { ready: Promise<void>; finished: Promise<void> };
+type SortKind = 'number' | 'text';
+type SortDirection = 'asc' | 'desc';
+type SortState = { column: string; direction: SortDirection; kind: SortKind } | null;
 const mappingLabels: Record<keyof ColumnMapping, string> = {
   compoundName: 'Tên hoạt chất (TSV) *', adduct: 'Ion/Adduct (TSV)', precursorMz: 'Precursor m/z (TSV) *',
   formula: 'Công thức phân tử (TSV)', reportedPpm: 'Sai số MZErrorPPM (TSV)', fragments: 'Mảnh vỡ (TSV)',
@@ -55,6 +59,37 @@ function metadataHeaderLabel(column: string) {
 
 function metadataText(value: string | number | null | undefined) {
   return value == null || value === '' ? '—' : String(value);
+}
+
+const vietnameseCollator = new Intl.Collator('vi', { numeric: true, sensitivity: 'base' });
+
+function sortableNumber(value: unknown) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const normalized = value.trim().replace(/\s/g, '').replace(',', '.');
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function inferSortKind(values: unknown[]): SortKind {
+  const populated = values.filter(value => value != null && String(value).trim() !== '');
+  return populated.length > 0 && populated.every(value => sortableNumber(value) != null) ? 'number' : 'text';
+}
+
+function SortableHeader({ column, label, subtitle, kind, sort, menuOpen, onMenu, onSort }: {
+  column: string; label: string; subtitle: string; kind: SortKind; sort: SortState;
+  menuOpen: boolean; onMenu: (column: string | null) => void; onSort: (sort: SortState) => void;
+}) {
+  const active = sort?.column === column;
+  return <>
+    <span className="table-heading-vn">{label}</span><small>{subtitle}</small>
+    <button type="button" className={`column-filter-trigger ${active ? 'active' : ''}`} aria-label={`Sắp xếp cột ${label}`} aria-haspopup="menu" aria-expanded={menuOpen} title={`Sắp xếp ${label}`} onPointerDown={event => event.stopPropagation()} onClick={() => onMenu(menuOpen ? null : column)}>{icons.filter}<span>{active ? (sort?.direction === 'asc' ? '↑' : '↓') : ''}</span></button>
+    {menuOpen && <div className="column-filter-menu" role="menu" onPointerDown={event => event.stopPropagation()}>
+      <button type="button" role="menuitem" className={active && sort?.direction === 'asc' ? 'active' : ''} onClick={() => { onSort({ column, direction: 'asc', kind }); onMenu(null); }}><b>↑</b><span>{kind === 'number' ? 'Từ thấp đến cao' : 'A → Z'}</span></button>
+      <button type="button" role="menuitem" className={active && sort?.direction === 'desc' ? 'active' : ''} onClick={() => { onSort({ column, direction: 'desc', kind }); onMenu(null); }}><b>↓</b><span>{kind === 'number' ? 'Từ cao đến thấp' : 'Z → A'}</span></button>
+      {active && <button type="button" role="menuitem" className="clear-sort" onClick={() => { onSort(null); onMenu(null); }}><b>×</b><span>Xóa sắp xếp</span></button>}
+    </div>}
+  </>;
 }
 
 function gnpsCompareUrl(result: AnalysisResult, rawUrl: string) {
@@ -158,6 +193,7 @@ export default function App() {
   const [stage, setStage] = useState<Stage>('upload'); const [result, setResult] = useState<AnalysisResult | null>(null);
   const [loading, setLoading] = useState(false); const [error, setError] = useState(''); const [query, setQuery] = useState('');
   const [status, setStatus] = useState<'all'|'matched'|'ambiguous'|'unmatched'|'selected'>('all'); const [mappingOpen, setMappingOpen] = useState(false);
+  const [sort, setSort] = useState<SortState>(null); const [sortMenuOpen, setSortMenuOpen] = useState<string | null>(null);
   const [mapping, setMapping] = useState<ColumnMapping | null>(null); const [headers, setHeaders] = useState<{tsv:string[];excel:string[]}>({tsv:[],excel:[]});
   const [exporting, setExporting] = useState(''); const [structureLoading, setStructureLoading] = useState(false); const [structureMessage, setStructureMessage] = useState('');
   const [loadingMode, setLoadingMode] = useState<'task'|'files'|null>(null);
@@ -223,6 +259,12 @@ export default function App() {
   }
 
   useEffect(() => { document.documentElement.dataset.theme = theme; localStorage.setItem('gnps2-theme', theme); }, [theme]);
+  useEffect(() => {
+    if (!sortMenuOpen) return;
+    const closeMenu = () => setSortMenuOpen(null);
+    document.addEventListener('pointerdown', closeMenu);
+    return () => document.removeEventListener('pointerdown', closeMenu);
+  }, [sortMenuOpen]);
   useEffect(() => () => {
     if (themeAnimationTimer.current) window.clearTimeout(themeAnimationTimer.current);
     document.documentElement.classList.remove('theme-fallback-transition');
@@ -303,18 +345,38 @@ export default function App() {
     finally { setLoading(false); setLoadingMode(null); }
   }
 
-  const filtered = useMemo(() => (result?.rows ?? []).filter((row) => {
-    const text = `${row.compoundName} ${row.adduct} ${row.molecularFormula} ${Object.values(row.sourceMetadata ?? {}).join(' ')}`.toLowerCase();
-    return text.includes(query.toLowerCase()) && (status === 'all' || (status === 'selected' ? row.selected : row.status === status));
-  }), [result, query, status]);
   const metadataColumns = useMemo(() => {
     const present = new Set((result?.rows ?? []).flatMap((row) => Object.keys(row.sourceMetadata ?? {})));
     const extras = [...present].filter((key) => !preferredMetadataColumns.includes(key as typeof preferredMetadataColumns[number])).sort((a,b)=>a.localeCompare(b));
     return [...preferredMetadataColumns, ...extras];
   }, [result]);
+  const metadataSortKinds = useMemo(() => new Map(metadataColumns.map(column => [column, inferSortKind((result?.rows ?? []).map(row => row.sourceMetadata?.[column]))])), [metadataColumns, result]);
+  const filtered = useMemo(() => {
+    const rows = (result?.rows ?? []).filter((row) => {
+      const text = `${row.compoundName} ${row.adduct} ${row.molecularFormula} ${Object.values(row.sourceMetadata ?? {}).join(' ')}`.toLowerCase();
+      return text.includes(query.toLowerCase()) && (status === 'all' || (status === 'selected' ? row.selected : row.status === status));
+    });
+    if (!sort) return rows;
+    const valueFor = (row: MatchRow): unknown => {
+      if (sort.column.startsWith('metadata:')) return row.sourceMetadata?.[sort.column.slice(9)];
+      return row[sort.column as keyof MatchRow];
+    };
+    return rows.map((row, index) => ({ row, index })).sort((left, right) => {
+      const leftValue = valueFor(left.row); const rightValue = valueFor(right.row);
+      const leftEmpty = leftValue == null || String(leftValue).trim() === '';
+      const rightEmpty = rightValue == null || String(rightValue).trim() === '';
+      if (leftEmpty !== rightEmpty) return leftEmpty ? 1 : -1;
+      if (leftEmpty && rightEmpty) return left.index - right.index;
+      const comparison = sort.kind === 'number'
+        ? (sortableNumber(leftValue) ?? 0) - (sortableNumber(rightValue) ?? 0)
+        : vietnameseCollator.compare(String(leftValue), String(rightValue));
+      return comparison === 0 ? left.index - right.index : comparison * (sort.direction === 'asc' ? 1 : -1);
+    }).map(item => item.row);
+  }, [result, query, status, sort]);
   const compareUrl = result ? gnpsCompareUrl(result, gnpsUrl || taskUrl) : '';
   const engineLabel = engineStatus === 'ready' ? 'Engine sẵn sàng' : engineStatus === 'checking' ? 'Đang kiểm tra' : 'Engine mất kết nối';
   const selectedCount = result?.rows.filter((row) => row.selected).length ?? 0;
+  const sortableHeader = (column: string, label: string, subtitle: string, kind: SortKind) => <SortableHeader column={column} label={label} subtitle={subtitle} kind={kind} sort={sort} menuOpen={sortMenuOpen === column} onMenu={setSortMenuOpen} onSort={setSort}/>;
   function update(id: string, patch: Partial<MatchRow>) { setResult((current) => current ? { ...current, rows: current.rows.map((row) => row.id === id ? { ...row, ...patch } : row) } : current); }
   function updateDetail(patch: Partial<MatchRow>) { if (!detailRow) return; update(detailRow.id, patch); setDetailRow({...detailRow,...patch}); }
   async function doExport(type: 'docx'|'xlsx') { if (!result) return; setExporting(type); setError(''); try { await download(`/api/export/${type}`, result.rows, type, reportTitle); } catch (e) { setError(e instanceof Error ? e.message : 'Xuất file thất bại.'); } finally { setExporting(''); } }
@@ -359,7 +421,7 @@ export default function App() {
         {structureMessage&&<motion.div className="notice" initial={{opacity:0,y:-8}} animate={{opacity:1,y:0}}><span>{icons.check}</span><p>{structureMessage}</p><button onClick={()=>setStructureMessage('')} aria-label="Đóng thông báo">{icons.close}</button></motion.div>}{error&&<div className="alert">{error}</div>}
         <div className="stats"><article><small>DÒNG TSV</small><strong>{result.summary.tsvRows}</strong><span>Dữ liệu nguồn</span></article><article><small>ĐÃ ĐỐI CHIẾU</small><strong>{result.summary.matched}</strong><span className="green">✓ Tìm thấy tên</span></article><article><small>CHƯA KHỚP</small><strong>{result.summary.unmatched}</strong><span>Không tìm thấy tên Excel</span></article><article><small>CẦN DUYỆT</small><strong>{result.rows.filter(r=>r.status==='ambiguous').length}</strong><span className="amber">Nhiều tên tương ứng</span></article><article><small>ĐÃ CHỌN</small><strong>{selectedCount}</strong><span>Sẽ đưa vào báo cáo</span></article></div>
         <div className={`results-workbench ${viewerTarget||gnpsViewerOpen?'viewer-open':''}`}><div className="data-card"><div className="table-tools"><div className="search">{icons.search}<input placeholder="Tìm trong tất cả trường dữ liệu…" value={query} onChange={(e)=>setQuery(e.target.value)}/></div><div className="filters">{(['all','matched','ambiguous','unmatched','selected'] as const).map(value=><button className={status===value?'active':''} onClick={()=>setStatus(value)} key={value}>{{all:'Tất cả',matched:'Khớp',ambiguous:'Cần duyệt',unmatched:'Chưa có RT',selected:'Đã chọn'}[value]}</button>)}</div><span className="result-count">{filtered.length} kết quả · {metadataColumns.length} trường nguồn</span></div>
-          <div className="table-wrap result-table-wrap"><table className="result-table"><thead><tr><th className="sticky-select"><input type="checkbox" checked={selectedCount===result.rows.length && !!selectedCount} onChange={(e)=>setResult({...result,rows:result.rows.map(r=>({...r,selected:e.target.checked}))})}/></th><th className="sticky-index"><span className="table-heading-vn">STT</span><small>Số thứ tự</small></th><th><span className="table-heading-vn">Thời gian lưu</span><small>tR (min)</small></th><th className="sticky-compound"><span className="table-heading-vn">Tên hoạt chất dự đoán</span><small>Compound name</small></th><th><span className="table-heading-vn">Ion / chất cộng</span><small>Ion / adduct</small></th><th><span className="table-heading-vn">Ion tiền chất</span><small>Precursor m/z</small></th><th><span className="table-heading-vn">Mảnh vỡ</span><small>Fragments (m/z)</small></th><th><span className="table-heading-vn">Công thức phân tử</span><small>Molecular formula · ppm</small></th><th><span className="table-heading-vn">Cấu trúc phân tử</span><small>Structure</small></th>{metadataColumns.map(column=><th className="metadata-heading" key={column} title={column}><span className="table-heading-vn">{metadataHeaderLabel(column)}</span><small>{column}</small></th>)}</tr></thead><tbody>
+          <div className="table-wrap result-table-wrap"><table className="result-table"><thead><tr><th className="sticky-select"><input type="checkbox" checked={selectedCount===result.rows.length && !!selectedCount} onChange={(e)=>setResult({...result,rows:result.rows.map(r=>({...r,selected:e.target.checked}))})}/></th><th className="sticky-index"><span className="table-heading-vn">STT</span><small>Số thứ tự</small></th><th className="sortable-column">{sortableHeader('rtDisplay','Thời gian lưu','tR (min)','number')}</th><th className="sticky-compound sortable-column">{sortableHeader('compoundName','Tên hoạt chất dự đoán','Compound name','text')}</th><th className="sortable-column">{sortableHeader('adduct','Ion / chất cộng','Ion / adduct','text')}</th><th className="sortable-column">{sortableHeader('mzTsv','Ion tiền chất','Precursor m/z','number')}</th><th className="sortable-column">{sortableHeader('fragments','Mảnh vỡ','Fragments (m/z)','text')}</th><th className="sortable-column">{sortableHeader('molecularFormula','Công thức phân tử','Molecular formula · ppm','text')}</th><th><span className="table-heading-vn">Cấu trúc phân tử</span><small>Structure</small></th>{metadataColumns.map(column=><th className="metadata-heading sortable-column" key={column} title={column}>{sortableHeader(`metadata:${column}`,metadataHeaderLabel(column),column,metadataSortKinds.get(column) ?? 'text')}</th>)}</tr></thead><tbody>
             {filtered.map((row,index)=><tr key={row.id} className={!row.selected?'muted':''}><td className="sticky-select"><input type="checkbox" checked={row.selected} onChange={(e)=>update(row.id,{selected:e.target.checked})}/></td><td className="mono faint sticky-index">{index+1}</td><td className="rt-cell"><input className="cell-input mono" value={row.rtDisplay} onChange={(e)=>update(row.id,{rtDisplay:e.target.value})}/></td><td className="wrapping-cell compound-cell sticky-compound"><textarea className="cell-input wrapping-input compound" rows={1} value={row.compoundName} onChange={(e)=>update(row.id,{compoundName:e.target.value})}/></td><td><input className="cell-input mono" value={row.adduct} onChange={(e)=>update(row.id,{adduct:e.target.value})}/></td><td><input className="cell-input mono" type="number" step="any" value={row.mzTsv} onChange={(e)=>update(row.id,{mzTsv:Number(e.target.value)})}/></td><td className="wrapping-cell fragments-cell"><textarea className="cell-input wrapping-input" rows={1} value={row.fragments} placeholder="—" onChange={(e)=>update(row.id,{fragments:e.target.value})}/></td><td className="formula-cell"><input className="cell-input mono formula-value" value={row.molecularFormula} onChange={(e)=>update(row.id,{molecularFormula:e.target.value})}/><label className="ppm-editor"><input className="cell-input mono" type="number" step="any" value={row.reportedMzErrorPpm ?? ''} placeholder="—" onChange={(e)=>update(row.id,{reportedMzErrorPpm:e.target.value===''?null:Number(e.target.value)})}/><span>ppm</span></label></td><td className="structure-cell">{row.structureData?<button className="structure-preview" type="button" onClick={()=>setDetailRow(row)} aria-label={`Xem chi tiết ${row.compoundName}`}><img src={row.structureData} alt={`Cấu trúc ${row.compoundName}`}/><small>Xem chi tiết</small></button>:<span>Chưa tra cứu</span>}</td>{metadataColumns.map(column=><MetadataCell key={column} value={row.sourceMetadata?.[column]}/>)}</tr>)}
           </tbody></table>{!filtered.length&&<div className="empty">Không có kết quả phù hợp bộ lọc.</div>}</div>
           <div className="table-footer"><span><b>{selectedCount}</b>/{result.rows.length} dòng được chọn</span><span>{result.source==='gnps-task'?'GNPS2 Library #Scan# · tR lấy từ ': 'Đối chiếu tên hợp chất · tR lấy từ '}<b>{result.source==='gnps-task'?'Network GraphML.rt_min':'Excel.rt_min'}</b></span></div>
