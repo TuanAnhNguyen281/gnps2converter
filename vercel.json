@@ -2,9 +2,13 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "vite",
   "installCommand": "npm ci",
-  "buildCommand": "npm run build:web",
+  "buildCommand": "VITE_API_BASE_URL= npm run build:web",
   "outputDirectory": "dist",
   "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://gnps2converter-api.onrender.com/api/:path*"
+    },
     { "source": "/(.*)", "destination": "/index.html" }
   ]
 }

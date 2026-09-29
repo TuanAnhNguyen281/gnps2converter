@@ -151,8 +151,9 @@ npm run build:web     # Vercel -> dist/
 
 - `render.yaml` hiện build cả frontend/API; chỉ đổi riêng build backend nếu chủ động chọn deploy tách frontend.
 - `vercel.json` chỉ build Vite SPA và rewrite route giao diện về `index.html`.
-- Trên Vercel, đặt `VITE_API_BASE_URL=https://<backend>.onrender.com` cho Production/Preview.
+- `vercel.json` chuyển tiếp `/api/*` sang `https://gnps2converter-api.onrender.com/api/*` trước rewrite SPA. Nếu đổi backend, cập nhật destination tương ứng.
+- Build Command trong `vercel.json` đặt `VITE_API_BASE_URL` rỗng cho bản Vercel để frontend gọi `/api` cùng origin, kể cả khi project còn giữ biến cũ. Có thể xóa biến cũ trong Vercel để tránh nhầm lẫn.
 - Trên Render, đặt `FRONTEND_ORIGIN=https://<frontend>.vercel.app`. Có thể nhập nhiều origin, phân cách bằng dấu phẩy.
 - Hai URL không có dấu `/` ở cuối. Sau khi thay environment variable, redeploy service tương ứng.
 
-Hai domain vercel.app/onrender.com không phù hợp cookie SameSite=Lax hiện tại. Dùng Vercel cần proxy cùng origin đã kiểm chứng cookie/redirect/upload/timeout, hoặc domain phù hợp và thiết kế cookie riêng. Chỉ đặt VITE_API_BASE_URL chưa đủ cho auth. Vercel Hobby có điều kiện sử dụng cá nhân/phi thương mại; Render cùng origin ở trên là mặc định.
+Đặt `APP_ORIGIN` trên Render bằng `https://gnps2converter.vercel.app` và `GOOGLE_REDIRECT_URI=https://gnps2converter.vercel.app/api/auth/google/callback`; đăng ký đúng callback này trên Google Cloud. Reverse proxy giữ API và cookie SameSite=Lax cùng origin phía trình duyệt. Sau deploy cần xác nhận `/api/auth/csrf` trả JSON, cookie giữ được qua request tiếp theo, callback Google, upload/download và streaming GNPS2. Proxy có giới hạn thời gian xử lý; kiểm tra task dài thực tế. Vercel Hobby có điều kiện sử dụng cá nhân/phi thương mại; Render cùng origin ở trên là mặc định.
