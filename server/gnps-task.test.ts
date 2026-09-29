@@ -1,7 +1,58 @@
-import { describe, expect, it } from 'vitest';
-import { extractGnpsTaskId, formatMirrorFragments, normalizeSourceMetadata, parseMgfFragments, parseNetworkGraphml, parseTaskStatus } from './gnps-task.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { extractGnpsTaskId, importGnpsTask, formatMirrorFragments, normalizeSourceMetadata, parseMgfFragments, parseNetworkGraphml, parseTaskStatus } from './gnps-task.js';
 
 const task = '2515573ac8c24ec8b85f553aad9b440e';
+
+describe('GNPS2 import failures and hostname regression', () => {
+  const done = '<table><tr><td>Status</td><td>DONE</td></tr></table>';
+  afterEach(() => vi.unstubAllGlobals());
+  it('imports Library Matches through gnps2.org without the unavailable www host', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(done))
+      .mockResolvedValueOnce(new Response(JSON.stringify([{ '#Scan#': '1', Compound_Name: 'Example' }])))
+      .mockResolvedValueOnce(new Response('<graphml><graph><node id="1"/></graph></graphml>'));
+    vi.stubGlobal('fetch', fetcher);
+    const result = await importGnpsTask(task);
+    expect(result.rows).toHaveLength(1);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(new URL(fetcher.mock.calls[1][0]).hostname).toBe('gnps2.org');
+  });
+  it('reports GNPS retrieval and real row-enrichment counts as stages complete', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(done))
+      .mockResolvedValueOnce(new Response(JSON.stringify([{ '#Scan#': '1', Compound_Name: 'Example' }])))
+      .mockResolvedValueOnce(new Response('<graphml><graph><node id="1"/></graph></graphml>'));
+    const events: Array<{ stage: string; title: string; current?: number; total?: number }> = [];
+    vi.stubGlobal('fetch', fetcher);
+    await importGnpsTask(task, (event) => events.push(event));
+    expect(events.map((event) => event.stage)).toEqual([
+      'task', 'task', 'matches', 'matches', 'network', 'network', 'enrichment', 'enrichment',
+    ]);
+    expect(events.at(-1)).toMatchObject({ stage: 'enrichment', current: 1, total: 1 });
+    expect(events.at(-1)?.title).toContain('bổ sung');
+  });
+  it('rejects an invalid task before making network requests', async () => {
+    const fetcher = vi.fn(); vi.stubGlobal('fetch', fetcher);
+    await expect(importGnpsTask('https://gnps2.org/status?task=wrong')).rejects.toMatchObject({status:400,code:'GNPS_TASK_INVALID'});
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+  it('reports a task that is still running instead of service unavailable', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(done.replace('DONE','RUNNING'))));
+    await expect(importGnpsTask(task)).rejects.toMatchObject({status:409,code:'GNPS_TASK_NOT_DONE'});
+  });
+  it('identifies a connection failure at Library Matches', async () => {
+    vi.stubGlobal('fetch',vi.fn().mockResolvedValueOnce(new Response(done)).mockRejectedValueOnce(new TypeError('fetch failed')));
+    await expect(importGnpsTask(task)).rejects.toMatchObject({status:502,code:'GNPS_CONNECTION_FAILED',message:expect.stringContaining('Library Matches')});
+  });
+  it('reports HTML or invalid JSON returned for Library Matches', async () => {
+    vi.stubGlobal('fetch',vi.fn().mockResolvedValueOnce(new Response(done)).mockResolvedValueOnce(new Response('<html>Login</html>')));
+    await expect(importGnpsTask(task)).rejects.toMatchObject({status:502,code:'GNPS_LIBRARY_INVALID'});
+  });
+  it('identifies the missing GraphML file', async () => {
+    vi.stubGlobal('fetch',vi.fn().mockResolvedValueOnce(new Response(done)).mockResolvedValueOnce(new Response('[]')).mockResolvedValueOnce(new Response('missing',{status:404})));
+    await expect(importGnpsTask(task)).rejects.toMatchObject({status:502,code:'GNPS_UPSTREAM_HTTP',message:expect.stringContaining('Network GraphML')});
+  });
+});
 
 describe('GNPS2 task importer', () => {
   it('extracts a task ID from supported GNPS2 URLs and rejects other hosts', () => {

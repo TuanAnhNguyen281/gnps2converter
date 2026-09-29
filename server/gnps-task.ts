@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { XMLParser } from 'fast-xml-parser';
 import type { MatchRow, RawRow } from './types.js';
+import type { MediaInput } from './media/provider.js';
+import { ApiError } from './errors.js';
+import { emitProgress, type ProgressReporter } from './progress.js';
 
 const TASK_PATTERN = /^[a-f0-9]{32}$/i;
 const GNPS_HOSTS = new Set(['gnps2.org', 'www.gnps2.org']);
@@ -9,24 +12,31 @@ const MAX_TEXT_BYTES = 30 * 1024 * 1024;
 export function extractGnpsTaskId(input: string): string {
   const trimmed = input.trim();
   if (TASK_PATTERN.test(trimmed)) return trimmed.toLowerCase();
-  const url = new URL(trimmed);
-  if (!GNPS_HOSTS.has(url.hostname.toLowerCase())) throw new Error('Chỉ chấp nhận link task từ gnps2.org.');
+  let url: URL;
+  try { url = new URL(trimmed); } catch {
+    throw new ApiError(400, 'Hãy nhập link GNPS2 hoặc Task ID hợp lệ.', 'GNPS_TASK_INVALID');
+  }
+  if (!GNPS_HOSTS.has(url.hostname.toLowerCase())) throw new ApiError(400, 'Chỉ chấp nhận link task từ gnps2.org.', 'GNPS_TASK_INVALID');
   const task = url.searchParams.get('task') ?? trimmed.match(/TASK-([a-f0-9]{32})/i)?.[1] ?? '';
-  if (!TASK_PATTERN.test(task)) throw new Error('Không tìm thấy Task ID GNPS2 hợp lệ trong đường dẫn.');
+  if (!TASK_PATTERN.test(task)) throw new ApiError(400, 'Không tìm thấy Task ID GNPS2 hợp lệ trong đường dẫn.', 'GNPS_TASK_INVALID');
   return task.toLowerCase();
 }
 
-async function fetchText(url: string, timeoutMs = 25_000): Promise<string> {
+async function fetchText(url: string, stage: string, timeoutMs = 25_000): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(url, { signal: controller.signal });
-    if (!response.ok) throw new Error(`GNPS2 HTTP ${response.status}`);
+    if (!response.ok) throw new ApiError(502, `Không đọc được ${stage} từ GNPS2 (HTTP ${response.status}). Kiểm tra task có công khai và đã hoàn tất.`, 'GNPS_UPSTREAM_HTTP');
     const size = Number(response.headers.get('content-length') ?? 0);
-    if (size > MAX_TEXT_BYTES) throw new Error('Tệp GNPS2 vượt quá giới hạn 30 MB.');
+    if (size > MAX_TEXT_BYTES) throw new ApiError(413, 'Tệp GNPS2 vượt quá giới hạn 30 MB.', 'GNPS_FILE_TOO_LARGE');
     const text = await response.text();
-    if (Buffer.byteLength(text) > MAX_TEXT_BYTES) throw new Error('Tệp GNPS2 vượt quá giới hạn 30 MB.');
+    if (Buffer.byteLength(text) > MAX_TEXT_BYTES) throw new ApiError(413, 'Tệp GNPS2 vượt quá giới hạn 30 MB.', 'GNPS_FILE_TOO_LARGE');
     return text;
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    if (controller.signal.aborted) throw new ApiError(504, `GNPS2 phản hồi quá chậm khi đọc ${stage}. Hãy thử lại.`, 'GNPS_TIMEOUT');
+    throw new ApiError(502, `Không kết nối được GNPS2 khi đọc ${stage}. Kiểm tra kết nối mạng của backend và thử lại.`, 'GNPS_CONNECTION_FAILED');
   } finally { clearTimeout(timer); }
 }
 
@@ -116,7 +126,7 @@ export function formatMirrorFragments(table: MirrorTable): string {
   }).filter(Boolean).join(', ');
 }
 
-async function mirrorFragments(task: string, scan: string, spectrumId: unknown): Promise<string> {
+async function mirrorFragments(task: string, scan: string, spectrumId: unknown, captures?: unknown[]): Promise<string> {
   const accession = String(spectrumId ?? '').trim();
   if (!scan || !accession) return '';
   const usi1 = `mzspec:GNPS2:TASK-${task}-nf_output/clustering/specs_ms.mgf:scan:${scan}`;
@@ -143,6 +153,7 @@ async function mirrorFragments(task: string, scan: string, spectrumId: unknown):
     });
     if (!response.ok) return '';
     const payload = await response.json() as { response?: { peak_table1?: MirrorTable } };
+    captures?.push({scan,spectrumId,payload});
     return formatMirrorFragments(payload.response?.peak_table1 ?? {});
   } catch { return ''; } finally { clearTimeout(timer); }
 }
@@ -169,27 +180,51 @@ async function structureDetails(item: Record<string, unknown>): Promise<{ image?
   } catch { return {}; } finally { clearTimeout(timer); }
 }
 
-export async function importGnpsTask(input: string) {
+export async function importGnpsTask(input: string, progress?: ProgressReporter) {
   const task = extractGnpsTaskId(input);
-  const statusHtml = await fetchText(`https://gnps2.org/status?task=${task}`);
+  emitProgress(progress, { stage: 'task', step: 1, percent: 3, title: 'Kiểm tra GNPS2 Task', message: 'Đang kiểm tra trạng thái và thông tin task.' });
+  const statusHtml = await fetchText(`https://gnps2.org/status?task=${task}`, 'trạng thái task');
   const metadata = parseTaskStatus(statusHtml);
-  if (metadata.status && metadata.status !== 'DONE') throw new Error(`Task GNPS2 chưa hoàn tất (trạng thái: ${metadata.status}).`);
-  const libraryText = await fetchText(`https://www.gnps2.org/result?json=&task=${task}&viewname=librarymatches`);
-  const library = JSON.parse(libraryText) as Array<Record<string, unknown>>;
-  if (!Array.isArray(library)) throw new Error('Library Matches GNPS2 không trả về danh sách hợp lệ.');
-  const graphml = await fetchText(`https://gnps2.org/resultfile?task=${task}&file=${encodeURIComponent('nf_output/networking/network_singletons.graphml')}`);
-  const nodes = parseNetworkGraphml(graphml);
+  if (metadata.status && metadata.status !== 'DONE') throw new ApiError(409, `Task GNPS2 chưa hoàn tất (trạng thái: ${metadata.status}).`, 'GNPS_TASK_NOT_DONE');
+  emitProgress(progress, { stage: 'task', step: 1, percent: 8, title: metadata.title || 'GNPS2 Task đã hoàn tất', message: `Task ${task} đã sẵn sàng để nhập dữ liệu${metadata.workflow ? ` · ${metadata.workflow}` : ''}.` });
+  emitProgress(progress, { stage: 'matches', step: 2, percent: 12, title: 'Đang lấy Library Matches', message: 'Đang tải danh sách kết quả khớp từ GNPS2.' });
+  const libraryText = await fetchText(`https://gnps2.org/result?json=&task=${task}&viewname=librarymatches`, 'Library Matches');
+  let library: Array<Record<string, unknown>>;
+  try {
+    library = JSON.parse(libraryText);
+    if (!Array.isArray(library) || library.some(item => !item || typeof item !== 'object' || Array.isArray(item))) throw new Error('Invalid rows');
+  } catch {
+    throw new ApiError(502, 'Library Matches GNPS2 không trả về danh sách JSON hợp lệ. Kiểm tra quyền truy cập và loại workflow của task.', 'GNPS_LIBRARY_INVALID');
+  }
+  emitProgress(progress, { stage: 'matches', step: 2, percent: 25, title: 'Đã lấy Library Matches', message: `Đã nhận ${library.length} dòng dữ liệu và các trường nguồn.`, current: library.length, total: library.length, succeeded: library.length });
+  emitProgress(progress, { stage: 'network', step: 3, percent: 29, title: 'Đang lấy Network & RT', message: 'Đang tải Network GraphML để đối chiếu thời gian lưu và cấu trúc.' });
+  const graphml = await fetchText(`https://gnps2.org/resultfile?task=${task}&file=${encodeURIComponent('nf_output/networking/network_singletons.graphml')}`, 'Network GraphML');
+  let nodes: Map<string, RawRow>;
+  try { nodes = parseNetworkGraphml(graphml); } catch {
+    throw new ApiError(502, 'Network GraphML của task không hợp lệ hoặc workflow này chưa được hỗ trợ.', 'GNPS_GRAPH_INVALID');
+  }
+  emitProgress(progress, { stage: 'network', step: 3, percent: 37, title: 'Đã đọc Network & RT', message: `Đã đọc ${nodes.size} node để ghép với Library Matches.`, current: nodes.size, total: nodes.size, succeeded: nodes.size });
+  emitProgress(progress, { stage: 'enrichment', step: 4, percent: 40, title: 'Đang bổ sung dữ liệu hợp chất', message: `Đang lấy ảnh cấu trúc, công thức và phổ mảnh vỡ cho ${library.length} hợp chất.`, current: 0, total: library.length });
+  const captures:unknown[]=[];
+  const sourceFiles:MediaInput[]=[
+    {name:'library_matches.json',kind:'gnps_matches',mime:'application/json',bytes:Buffer.from(libraryText)},
+    {name:'network_singletons.graphml',kind:'gnps_graphml',mime:'application/xml',bytes:Buffer.from(graphml)},
+  ];
   const rows: MatchRow[] = [];
   let graphMatched = 0; let rtFallback = 0;
+  let structureCount = 0; let fragmentCount = 0; let enrichedCount = 0;
   for (let index = 0; index < library.length; index += 5) {
     const batch = library.slice(index, index + 5);
     const enriched = await Promise.all(batch.map(async (item) => {
       const scan = String(item['#Scan#'] ?? '').trim();
       const [structure, fragments] = await Promise.all([
-        structureDetails({ ...nodes.get(scan), ...item }), mirrorFragments(task, scan, item.SpectrumID),
+        structureDetails({ ...nodes.get(scan), ...item }), mirrorFragments(task, scan, item.SpectrumID,captures),
       ]);
       return { structure, fragments };
     }));
+    enrichedCount += batch.length;
+    structureCount += enriched.filter((item) => item.structure.image).length;
+    fragmentCount += enriched.filter((item) => item.fragments).length;
     batch.forEach((item, offset) => {
       const sourceIndex = index + offset;
       const scan = String(item['#Scan#'] ?? '').trim();
@@ -211,6 +246,16 @@ export async function importGnpsTask(input: string) {
         status: node && graphRt ? 'matched' : rt ? 'ambiguous' : 'unmatched', structureData: enriched[offset].structure.image,
       });
     });
+    emitProgress(progress, {
+      stage: 'enrichment', step: 4,
+      percent: library.length ? Math.round(40 + 27 * enrichedCount / library.length) : 67,
+      title: 'Đang bổ sung dữ liệu hợp chất',
+      message: `Đã xử lý ${enrichedCount}/${library.length} hợp chất · ${structureCount} ảnh cấu trúc · ${fragmentCount} phổ mảnh vỡ.`,
+      current: enrichedCount, total: library.length, succeeded: enrichedCount,
+      detail: `${structureCount} ảnh cấu trúc · ${fragmentCount} phổ mảnh vỡ`,
+    });
   }
-  return { task, metadata, rows, libraryHeaders: Object.keys(library[0] ?? {}), graphMatched, rtFallback, graphNodes: nodes.size, structures: rows.filter((row) => row.structureData).length, fragments: rows.filter((row) => row.fragments).length };
+  if (!library.length) emitProgress(progress, { stage: 'enrichment', step: 4, percent: 67, title: 'Không có dòng cần bổ sung', message: 'Library Matches không có hợp chất để lấy ảnh hoặc phổ mảnh vỡ.', current: 0, total: 0, succeeded: 0 });
+  if(captures.length)sourceFiles.push({name:'spectrum_peaks.json',kind:'gnps_mgf',mime:'application/json',bytes:Buffer.from(JSON.stringify(captures))});
+  return { task, metadata, rows, sourceFiles, libraryHeaders: Object.keys(library[0] ?? {}), graphMatched, rtFallback, graphNodes: nodes.size, structures: rows.filter((row) => row.structureData).length, fragments: rows.filter((row) => row.fragments).length };
 }

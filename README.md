@@ -10,7 +10,7 @@ Nếu node không có `rt_min`, ứng dụng dùng `RT_Query` và đánh dấu d
 
 ## Chạy local
 
-Yêu cầu Node.js 20.17+ (khuyến nghị Node 22 LTS).
+Yêu cầu Node.js 22.19+ thuộc dòng 22 LTS. Cấu hình `.env` và chạy `npm run db:migrate` trước khi dùng tài khoản.
 
 ```bash
 npm install
@@ -86,7 +86,61 @@ npm run build
 npm audit
 ```
 
-## Deploy: Render backend + Vercel frontend
+## Backend tài khoản và lưu dữ liệu
+
+Đã có email/mật khẩu, Google OpenID Connect, liên kết Google sau xác thực lại, đổi mật khẩu và đăng xuất. Session lưu PostgreSQL, cookie HttpOnly, CSRF cho thao tác ghi; mọi báo cáo/ảnh/file kiểm tra chủ sở hữu trên server. Giao diện có **Báo cáo của tôi**, tìm lịch sử, mở lại, xóa, tự lưu và xử lý xung đột giữa hai tab. Xuất Word/Excel chờ lưu thành công và đọc dữ liệu đã lưu.
+
+Chưa có quên mật khẩu/xác minh email qua thư, nhóm hay quản trị. Không có bypass đăng nhập hoặc tài khoản demo trong production.
+
+### Thiết lập local
+
+1. Copy `.env.example` thành `.env`, đã được gitignore. Không commit/gửi secret trong chat.
+2. Tạo PostgreSQL trên Neon, copy **pooled connection string có TLS** vào `DATABASE_URL`; **direct connection string** vào `MIGRATION_DATABASE_URL`. PostgreSQL local cũng dùng được.
+3. Tạo `SESSION_SECRET` ngẫu nhiên ít nhất 32 ký tự, giữ cố định qua restart:
+
+   ```bash
+   node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
+   ```
+
+4. Chạy `npm run db:migrate`, rồi `npm run dev`. Migration trong `migrations/` có checksum, transaction và advisory lock; không tự chạy khi app startup. Không sửa migration đã áp dụng. Schema Drizzle là bản mô tả TypeScript; repositories dùng SQL tham số để quản lý transaction/lock. PostgreSQL session store riêng tương thích `express-session`.
+5. Thiếu Google/Cloudinary vẫn thử được tài khoản mật khẩu và lưu kết quả. Google bị tắt khi thiếu config; ảnh/file thiếu Cloudinary phải báo **chưa lưu đủ**. Thiếu DATABASE_URL hoặc SESSION_SECRET, health vẫn chạy nhưng auth/nghiệp vụ trả 503.
+
+### Google OAuth
+
+1. Tạo project Google Cloud, OAuth consent screen và client kiểu **Web application**, scopes `openid email profile`.
+2. Local đăng ký redirect chính xác `http://localhost:5173/api/auth/google/callback`; Vite proxy chuyển callback sang API, cookie/browser cùng origin.
+3. Điền GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI và restart. Consent ở chế độ Testing phải thêm tài khoản vào test users.
+4. Production thêm `https://<service>.onrender.com/api/auth/google/callback`; đổi APP_ORIGIN/redirect tương ứng.
+5. Nếu trùng email tài khoản mật khẩu: login bằng mật khẩu, mở menu tài khoản và chọn **Liên kết Google**. Không tự gộp bằng email. User chỉ dùng Google chưa có chức năng đặt mật khẩu mới.
+
+### Cloudinary và file nguồn
+
+1. Tạo Cloudinary product environment; điền CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET. Không đưa secret vào VITE_* hoặc mở unsigned upload preset.
+2. Ảnh PNG/JPEG/WebP dùng `image`; file dùng `raw`. Tất cả delivery type **authenticated**. Frontend tải qua endpoint có session/owner check; URL cloud ký ngắn hạn chỉ dùng bên trong server.
+3. PostgreSQL lưu metadata/hash, Cloudinary asset/public ID và liên kết tài khoản/báo cáo/dòng/revision; không lưu bytes/base64. TSV/XLSX gốc giữ nguyên, không đổi khi sửa kết quả.
+4. Luồng GNPS Task hiện lưu **Library Matches JSON, Network GraphML và JSON peaks từ mirror service**. Engine dùng mirror API cho fragments, chưa tải consensus MGF trực tiếp; không giả lập MGF từ JSON. Luồng file lưu TSV/XLSX đã upload.
+5. Nếu upload một phần lỗi, giữ kết quả và hiện **ảnh/file chưa lưu đủ**. Chọn lại đúng file để retry; backend kiểm tra hash. File bị từ chối trước quota reservation cần bổ sung sau giải phóng quota. Bytes chưa upload không tồn tại qua restart; không hứa retry tự động từ metadata.
+6. Mở lại báo cáo tải TSV/XLSX đã lưu để xem nguồn/ánh xạ. Mục **Ảnh và file đã lưu** cho tải file nguồn, ảnh, bản xuất. Giữ tối đa 5 bản xuất gần nhất/báo cáo, file nguồn giữ riêng. Upload bản xuất lỗi vẫn cho tải file vừa tạo, báo chưa lưu bản cloud.
+7. Xóa báo cáo thu hồi quyền ngay; cleanup xóa tài sản không còn tham chiếu. Trạng thái tác vụ xóa/retry lưu DB; chỉ trừ usage sau cloud xác nhận. Cleanup chạy startup/khi có hoạt động, có thể chậm khi Render ngủ.
+
+Quota mặc định: 20 báo cáo/user, 1.000 dòng/báo cáo, 1 MiB JSON/báo cáo, 100 MB ảnh/file/user; file tối đa **9.500.000 bytes**, ảnh 2.000.000 bytes. Cloudinary Free có [10 MB/raw hoặc image](https://cloudinary.com/pricing/compare-plans), [credits dùng chung storage/bandwidth/transformations](https://cloudinary.com/documentation/billing_and_plans). Theo dõi dashboard cả Neon lẫn Cloudinary và điều chỉnh quota theo dataset thực; file GNPS quá lớn báo chưa lưu, không cắt ngầm.
+
+### Deploy mặc định: Render chung frontend/API + Neon + Cloudinary
+
+1. `render.yaml` build web + server, start `npm start`, Node 22, health `/api/health`. Để trống VITE_API_BASE_URL để dùng `/api` cùng origin.
+2. NODE_ENV=production; APP_ORIGIN và FRONTEND_ORIGIN bằng URL Render public, không dấu `/` cuối. Google callback cùng origin. SESSION_SECRET do Blueprint tạo hoặc tự tạo, giữ ổn định. TRUST_PROXY_HOPS=1 cần kiểm tra khớp proxy thực tế, không trust mọi proxy.
+3. Điền DATABASE_URL, Google, Cloudinary environment ở Render. MIGRATION_DATABASE_URL chỉ dùng ở máy/CI migration, không cần runtime.
+4. Chạy migration ở môi trường được ủy quyền trước release. Không dựa vào pre-deploy job gói Free.
+5. Render có cold start và filesystem không bền vững; DB/file nằm ngoài Render. Gói free dành cho MVP trong quota, chưa đảm bảo uptime quan trọng.
+6. Kiểm chứng HTTPS/Google/cookie Secure, authenticated ảnh/raw download và pooling/TLS Neon bằng credentials thật trước phát hành. Thiếu credentials chỉ xác nhận code/test local, chưa xác nhận deploy.
+
+### Kiểm thử và backup
+
+`npm test` có integration tests dùng PostgreSQL qua PGlite riêng trong bộ nhớ và Cloudinary provider giả lập, không đụng DB production. Kiểm tra auth/CSRF, ownership, quota, idempotency, revision, rollback, retry/delete tài sản và xuất Word/Excel. PGlite không thay thế kiểm thử TLS/pooling/cold start Neon hay OAuth/Cloudinary thật.
+
+Backup cần `pg_dump` bằng direct database connection, manifest mapping asset/hash, và bản sao bytes Cloudinary ở nơi độc lập. Restore DB không tự khôi phục file cloud: kiểm tra mapping/hash và download sau restore. Chưa có lịch backup tự động; cần cấu hình nơi lưu/lịch trước vận hành.
+
+## Tùy chọn Render backend + Vercel frontend
 
 Repo có hai pipeline build độc lập:
 
@@ -95,10 +149,10 @@ npm run build:server  # Render -> dist-server/
 npm run build:web     # Vercel -> dist/
 ```
 
-- `render.yaml` tạo Node Web Service gói Free, chạy backend bằng `npm start` và healthcheck `/api/health`.
+- `render.yaml` hiện build cả frontend/API; chỉ đổi riêng build backend nếu chủ động chọn deploy tách frontend.
 - `vercel.json` chỉ build Vite SPA và rewrite route giao diện về `index.html`.
 - Trên Vercel, đặt `VITE_API_BASE_URL=https://<backend>.onrender.com` cho Production/Preview.
 - Trên Render, đặt `FRONTEND_ORIGIN=https://<frontend>.vercel.app`. Có thể nhập nhiều origin, phân cách bằng dấu phẩy.
 - Hai URL không có dấu `/` ở cuối. Sau khi thay environment variable, redeploy service tương ứng.
 
-Luồng khuyến nghị: tạo Render Blueprint lấy backend URL → đặt URL đó trên Vercel và deploy → lấy domain Vercel → đặt `FRONTEND_ORIGIN` trên Render → redeploy Render.
+Hai domain vercel.app/onrender.com không phù hợp cookie SameSite=Lax hiện tại. Dùng Vercel cần proxy cùng origin đã kiểm chứng cookie/redirect/upload/timeout, hoặc domain phù hợp và thiết kế cookie riêng. Chỉ đặt VITE_API_BASE_URL chưa đủ cho auth. Vercel Hobby có điều kiện sử dụng cá nhân/phi thương mại; Render cùng origin ở trên là mặc định.
