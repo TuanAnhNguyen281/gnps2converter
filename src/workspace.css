@@ -3313,3 +3313,149 @@ body {
     padding:11px 11px 9px;
   }
 }
+
+/* Keep the report grid compact after workspace theme overrides. */
+.workspace-shell .result-table td { padding:4px 3px; }
+.workspace-shell .result-table th { padding:6px 3px; }
+.workspace-shell .result-table th:nth-child(3),
+.workspace-shell .result-table td:nth-child(3) { min-width:68px; width:68px; max-width:68px; }
+.workspace-shell .result-table .sticky-select { min-width:34px; width:34px; max-width:34px; }
+.workspace-shell .result-table .sticky-index { left:34px; min-width:38px; width:38px; max-width:38px; }
+.workspace-shell .result-table .sticky-compound { left:72px; min-width:174px; width:174px; max-width:174px; }
+.workspace-shell .result-table .structure-cell { min-width:76px; width:76px; max-width:76px; }
+.workspace-shell .result-table .structure-preview { max-width:68px; padding:1px; }
+.workspace-shell .result-table .structure-preview img { width:54px; height:38px; }
+.workspace-shell .result-table .structure-preview small { font-size:7px; }
+.workspace-shell .result-table .compound { min-width:0; }
+.workspace-shell .result-table .table-heading-en { color:var(--ui-muted); font-size:7px; }
+.workspace-shell .result-table .table-heading-vn { font-size:8px; }
+.workspace-shell .result-table .readonly-cell-content { font-size:10px; }
+.workspace-shell .result-table .grid-cell-selected { background:var(--ui-accent-soft) !important; box-shadow:inset 0 0 0 2px var(--ui-accent); }
+.workspace-shell .result-table .compound-edit-input { color:var(--ui-text); background:var(--ui-surface); border-color:var(--ui-accent); }
+.workspace-shell .table-copy-button { color:var(--ui-text); border-color:var(--ui-line); background:var(--ui-subtle); }
+@media(max-width:760px) {
+  .workspace-shell .result-table .sticky-compound { min-width:154px; width:154px; max-width:154px; }
+  .workspace-shell .result-table .compound-edit-button { opacity:1; }
+}
+
+/* Compact, resizable bilingual report grid and direct editing controls. */
+.workspace-shell .result-table col { min-width:0; }
+.workspace-shell .result-table th:not(.sticky-select),
+.workspace-shell .result-table td:not(.sticky-select) {
+  width:auto !important;
+  min-width:0 !important;
+  max-width:none !important;
+}
+.workspace-shell .result-table .sticky-select { width:34px !important; min-width:34px !important; max-width:34px !important; }
+.workspace-shell .result-table .sticky-index { left:34px; }
+.workspace-shell .result-table .sticky-compound { left:72px; }
+.workspace-shell .result-table .metadata-heading,
+.workspace-shell .result-table .metadata-cell { min-width:0 !important; max-width:none !important; }
+.workspace-shell .result-table .structure-cell { min-width:0 !important; }
+.workspace-shell .result-table th { position:sticky; top:0; }
+.workspace-shell .result-table .table-heading-en {
+  color:var(--ui-text);
+  font-weight:700;
+  font-size:7px;
+  line-height:1.15;
+  opacity:.96;
+}
+.workspace-shell .result-table .table-heading-vn {
+  display:block;
+  color:var(--ui-muted);
+  font-size:7.5px;
+  line-height:1.2;
+  font-weight:400;
+}
+.workspace-shell .result-table thead th .table-heading-en { margin:0 0 3px; }
+.workspace-shell .result-table,
+.workspace-shell .result-table th,
+.workspace-shell .result-table td { user-select:none; -webkit-user-select:none; }
+.workspace-shell .result-table input,
+.workspace-shell .result-table textarea,
+.workspace-shell .result-table [contenteditable="true"] { user-select:text; -webkit-user-select:text; }
+.workspace-shell .result-table .grid-edit-input {
+  display:block;
+  width:100%;
+  min-width:0;
+  height:22px;
+  padding:2px 3px;
+  border:1px solid transparent;
+  border-radius:3px;
+  outline:0;
+  background:transparent;
+  color:var(--ui-text);
+  font:10px/1.25 "DM Mono",monospace;
+  text-align:inherit;
+  text-overflow:clip;
+}
+.workspace-shell .result-table .compound-name-input {
+  font-family:"Be Vietnam Pro",sans-serif;
+  text-align:left;
+  font-weight:500;
+}
+.workspace-shell .result-table .grid-edit-input:focus {
+  border-color:var(--ui-accent);
+  background:var(--ui-surface);
+  box-shadow:0 0 0 1px var(--ui-accent-soft);
+}
+.workspace-shell .result-table .grid-cell-selected { user-select:none; }
+.workspace-shell .result-table .column-resize-handle {
+  position:absolute;
+  z-index:12;
+  top:0;
+  right:-2px;
+  width:6px;
+  height:100%;
+  cursor:col-resize;
+  touch-action:none;
+}
+.workspace-shell .result-table .column-resize-handle:hover,
+.workspace-shell .result-table .column-resize-handle:focus-visible { background:var(--ui-accent); outline:0; }
+.workspace-shell .result-table thead .column-filter-trigger { z-index:13; }
+.workspace-shell .table-edit-all-button.active { color:var(--ui-accent); border-color:var(--ui-accent); background:var(--ui-accent-soft); }
+.workspace-shell .table-action-label { display:grid; gap:2px; text-align:left; }
+.workspace-shell .table-action-label b { color:var(--ui-text); font-size:9px; font-weight:700; line-height:1.1; }
+.workspace-shell .table-action-label small { color:var(--ui-muted); font-size:8px; font-weight:400; line-height:1.1; }
+.workspace-shell .result-table .structure-preview { padding:1px; }
+.workspace-shell .result-table .structure-preview img { width:48px; height:34px; }
+.workspace-shell .result-table .grid-column-pinned {
+  position:sticky;
+  z-index:5;
+  background:var(--ui-surface) !important;
+  box-shadow:4px 0 8px -7px var(--ui-text);
+}
+.workspace-shell .result-table thead .grid-column-pinned { z-index:18; background:var(--ui-subtle) !important; }
+.workspace-shell .result-table .grid-pinned-rows td,
+.workspace-shell .result-table .grid-row-pinned-cell {
+  position:sticky;
+  z-index:9;
+  background:var(--ui-accent-soft) !important;
+  box-shadow:inset 0 -1px 0 var(--ui-accent);
+}
+.workspace-shell .result-table .grid-row-pinned-cell.grid-column-pinned { z-index:12; }
+.workspace-shell .result-table .grid-pinned-rows .sticky-select { z-index:12; }
+.workspace-shell .result-table thead .sticky-select { z-index:20; }
+.workspace-shell .result-table .grid-pin-indicator {
+  display:inline-flex;
+  width:12px;
+  height:12px;
+  margin-left:4px;
+  vertical-align:middle;
+  color:var(--ui-accent);
+}
+.workspace-shell .result-table .grid-pin-indicator svg { width:12px; height:12px; fill:none; stroke:currentColor; stroke-width:1.8; }
+.workspace-shell .table-pin-button { padding:6px 7px; gap:5px; }
+.workspace-shell .table-tools { gap:8px; }
+.workspace-shell .dialog-form-title-en { display:block; margin-top:4px; color:var(--ui-text); font-size:8px; font-weight:700; }
+.workspace-shell .dialog-form-title-vn { display:block; color:var(--ui-muted); font-size:7px; font-weight:400; }
+.workspace-shell .dialog-label-pair,
+.workspace-shell .dialog-readonly-field > span { display:grid; gap:3px; margin-bottom:0; text-transform:none; letter-spacing:0; }
+.workspace-shell .dialog-label-pair b,
+.workspace-shell .dialog-readonly-field > span b { color:var(--ui-text); font-size:8px; font-weight:700; }
+.workspace-shell .dialog-label-pair small,
+.workspace-shell .dialog-readonly-field > span small { color:var(--ui-muted); font-size:7px; font-weight:400; text-transform:uppercase; letter-spacing:.4px; }
+@media(max-width:760px) {
+  .workspace-shell .result-table .sticky-compound { min-width:0 !important; width:auto !important; max-width:none !important; }
+  .workspace-shell .table-action-label b { font-size:8px; }
+}

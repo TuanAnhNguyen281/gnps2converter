@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import type {
   AnalysisResult,
@@ -7,6 +7,19 @@ import type {
   MatchRow,
   PreviewValue,
 } from "./types";
+import {
+  isGridCellSelected as cellIsSelected,
+  isGridRowSelected as rowIsSelected,
+  makeGridColumnSelection,
+  makeGridRowSelection,
+  moveGridSelection,
+  orderPinnedColumns,
+  orderPinnedRows,
+  selectionRowAndColumnIndexes,
+  selectionToTsv,
+  toggleGridCellSelection,
+  type GridSelection,
+} from "./result-table-grid";
 
 import { apiFetch, apiUrl, jsonApi, postProgressStream, type PipelineProgress } from "./api";
 import { useReport, type SavedResult } from "./useReport";
@@ -95,6 +108,12 @@ const icons = {
       <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" />
     </svg>
   ),
+  pin: (
+    <svg viewBox="0 0 24 24">
+      <path d="m16 3 5 5-4 1-4 4-1 5-2-2-5 5 2-7 5-5 4-4z" />
+      <path d="m8 16-5 5" />
+    </svg>
+  ),
 };
 
 type Stage = "upload" | "results";
@@ -111,6 +130,23 @@ type SortState = {
   direction: SortDirection;
   kind: SortKind;
 } | null;
+type ColumnResizeSession = { key: string; startX: number; startWidth: number };
+const columnWidthStorageKey = "gnps-report-column-widths-v1";
+const gridPinStorageKey = "gnps-report-grid-pins-v1";
+type ReportGridPins = { rowIds: string[]; columnKeys: string[] };
+const defaultColumnWidths: Record<string, number> = {
+  stt: 38,
+  rtDisplay: 78,
+  compoundName: 150,
+  adduct: 84,
+  mzTsv: 82,
+  fragments: 110,
+  molecularFormula: 94,
+  reportedMzErrorPpm: 72,
+  structure: 76,
+};
+const minColumnWidth = 44;
+const maxColumnWidth = 600;
 const formatSavedAt = (value: string) => {
   const date = new Date(value);
   return Number.isNaN(date.getTime())
@@ -285,8 +321,8 @@ function SortableHeader({
   const active = sort?.column === column;
   return (
     <>
+      <small className="table-heading-en">{subtitle}</small>
       <span className="table-heading-vn">{label}</span>
-      <small>{subtitle}</small>
       <button
         type="button"
         className={`column-filter-trigger ${active ? "active" : ""}`}
@@ -295,7 +331,10 @@ function SortableHeader({
         aria-expanded={menuOpen}
         title={`Sắp xếp ${label}`}
         onPointerDown={(event) => event.stopPropagation()}
-        onClick={() => onMenu(menuOpen ? null : column)}
+        onClick={(event) => {
+          event.stopPropagation();
+          onMenu(menuOpen ? null : column);
+        }}
       >
         {icons.filter}
         <span>{active ? (sort?.direction === "asc" ? "↑" : "↓") : ""}</span>
@@ -305,6 +344,7 @@ function SortableHeader({
           className="column-filter-menu"
           role="menu"
           onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
         >
           <button
             type="button"
@@ -372,24 +412,107 @@ function gnpsCompareUrl(result: AnalysisResult, rawUrl: string) {
 
 function MetadataCell({
   value,
+  selected,
+  editing,
+  numeric,
+  onChange,
+  onPointerDown,
+  onPointerEnter,
+  onEditorPointerDown,
+  className = "",
+  style,
 }: {
   value: string | number | null | undefined;
+  selected: boolean;
+  editing: boolean;
+  numeric: boolean;
+  onChange: (value: string | number | null) => void;
+  onPointerDown: (event: ReactPointerEvent<HTMLTableCellElement>) => void;
+  onPointerEnter: (event: ReactPointerEvent<HTMLTableCellElement>) => void;
+  onEditorPointerDown: (event: ReactPointerEvent<HTMLInputElement>) => void;
+  className?: string;
+  style?: CSSProperties;
 }) {
   const text = metadataText(value);
   return (
-    <td className="metadata-cell" title={text}>
-      <span>{text}</span>
-      {text !== "—" && (
+    <td
+      className={`metadata-cell grid-cell ${className} ${selected ? "grid-cell-selected" : ""}`}
+      style={style}
+      title={text}
+      data-copy-value={text === "—" ? "" : text}
+      onPointerDown={onPointerDown}
+      onPointerEnter={onPointerEnter}
+    >
+      {editing ? (
+        <GridEditInput
+          className="grid-edit-input"
+          type={numeric ? "number" : "text"}
+          step="any"
+          aria-label={`Chỉnh sửa ${text}`}
+          onPointerDown={onEditorPointerDown}
+          value={value}
+          onChange={(next) => onChange(numeric ? next : (next ? String(next) : null))}
+        />
+      ) : (
+        <span className="readonly-cell-content">{text}</span>
+      )}
+      {!editing && text !== "—" && (
         <button
           type="button"
           aria-label={`Sao chép ${text}`}
           title="Sao chép"
-          onClick={() => void navigator.clipboard?.writeText(text)}
+          onClick={(event) => {
+            event.stopPropagation();
+            void navigator.clipboard?.writeText(text);
+          }}
         >
           {icons.copy}
         </button>
       )}
     </td>
+  );
+}
+
+function GridEditInput({
+  value,
+  type = "text",
+  className,
+  step,
+  ...props
+}: {
+  value: string | number | null | undefined;
+  type?: "text" | "number";
+  className: string;
+  step?: string;
+  "aria-label": string;
+  onPointerDown: (event: ReactPointerEvent<HTMLInputElement>) => void;
+  onChange: (value: string | number | null) => void;
+}) {
+  const [draft, setDraft] = useState(value == null ? "" : String(value));
+  useEffect(() => setDraft(value == null ? "" : String(value)), [value]);
+  const commitNumber = () => {
+    const parsed = draft.trim() ? Number(draft) : null;
+    props.onChange(parsed != null && Number.isFinite(parsed) ? parsed : null);
+  };
+  return (
+    <input
+      {...props}
+      className={className}
+      type={type}
+      step={type === "number" ? step ?? "any" : undefined}
+      value={draft}
+      onChange={(event) => {
+        const next = event.target.value;
+        setDraft(next);
+        if (type === "text") props.onChange(next);
+      }}
+      onBlur={() => {
+        if (type === "number") commitNumber();
+      }}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" && type === "number") event.currentTarget.blur();
+      }}
+    />
   );
 }
 
@@ -762,6 +885,45 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
+  const [gridSelection, setGridSelection] = useState<GridSelection | null>(null);
+  const [pinScopeKey, setPinScopeKey] = useState(() => `draft:${crypto.randomUUID()}`);
+  const [gridPinPreferences, setGridPinPreferences] = useState<Record<string, ReportGridPins>>(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem(gridPinStorageKey) || "{}") as Record<string, unknown>;
+      return Object.fromEntries(Object.entries(stored).flatMap(([key, value]) => {
+        if (!value || typeof value !== "object") return [];
+        const pins = value as Partial<ReportGridPins>;
+        return [[key, {
+          rowIds: Array.isArray(pins.rowIds) ? pins.rowIds.filter((id): id is string => typeof id === "string") : [],
+          columnKeys: Array.isArray(pins.columnKeys) ? pins.columnKeys.filter((column): column is string => typeof column === "string") : [],
+        } satisfies ReportGridPins]];
+      }));
+    } catch {
+      return {};
+    }
+  });
+  const [copyMessage, setCopyMessage] = useState("");
+  const [allEditMode, setAllEditMode] = useState(false);
+  const [columnWidths, setColumnWidths] = useState<Record<string, number>>(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem(columnWidthStorageKey) || "{}") as Record<string, unknown>;
+      return Object.fromEntries(Object.entries(stored).filter(([, width]) =>
+        typeof width === "number" && Number.isFinite(width) && width >= minColumnWidth && width <= maxColumnWidth,
+      )) as Record<string, number>;
+    } catch {
+      return {};
+    }
+  });
+  const [editingCompoundId, setEditingCompoundId] = useState<string | null>(null);
+  const [compoundDraft, setCompoundDraft] = useState("");
+  const tableWrapRef = useRef<HTMLDivElement>(null);
+  const gridHeadRef = useRef<HTMLTableSectionElement>(null);
+  const pinnedGridRowRefs = useRef(new Map<string, HTMLTableRowElement>());
+  const [gridHeaderHeight, setGridHeaderHeight] = useState(42);
+  const [pinnedGridRowOffsets, setPinnedGridRowOffsets] = useState<Record<string, number>>({});
+  const dragAnchorRef = useRef<{ row: number; column: number } | null>(null);
+  const dragSelectionActiveRef = useRef(false);
+  const columnResizeRef = useRef<ColumnResizeSession | null>(null);
   const [status, setStatus] = useState<
     "all" | "matched" | "ambiguous" | "unmatched" | "selected"
   >("all");
@@ -790,6 +952,46 @@ export default function App() {
     document.addEventListener("pointerdown", closeMenu);
     return () => document.removeEventListener("pointerdown", closeMenu);
   }, [sortMenuOpen]);
+  useEffect(() => {
+    try {
+      localStorage.setItem(columnWidthStorageKey, JSON.stringify(columnWidths));
+    } catch {
+      // Column sizing still works for this session when browser storage is unavailable.
+    }
+  }, [columnWidths]);
+  useEffect(() => {
+    try {
+      localStorage.setItem(gridPinStorageKey, JSON.stringify(gridPinPreferences));
+    } catch {
+      // Pinning remains available for this session when browser storage is unavailable.
+    }
+  }, [gridPinPreferences]);
+  useEffect(() => {
+    if (!saved.id || pinScopeKey.startsWith("report:")) return;
+    const reportScope = `report:${saved.id}`;
+    setGridPinPreferences((current) => {
+      const draftPins = current[pinScopeKey];
+      if (!draftPins) return current;
+      const remaining = { ...current };
+      delete remaining[pinScopeKey];
+      return remaining[reportScope]
+        ? remaining
+        : { ...remaining, [reportScope]: draftPins };
+    });
+    setPinScopeKey(reportScope);
+  }, [saved.id, pinScopeKey]);
+  useEffect(() => {
+    const stopDrag = () => {
+      dragSelectionActiveRef.current = false;
+      dragAnchorRef.current = null;
+    };
+    window.addEventListener("pointerup", stopDrag);
+    window.addEventListener("pointercancel", stopDrag);
+    return () => {
+      window.removeEventListener("pointerup", stopDrag);
+      window.removeEventListener("pointercancel", stopDrag);
+    };
+  }, []);
   useEffect(() => {
     let active = true;
     let request: AbortController | null = null;
@@ -909,6 +1111,13 @@ export default function App() {
         throw new Error(payload.message ?? "Phân tích thất bại.");
       }
       saved.adopt(payload, reportTitle, [tsv, xlsx]);
+      setPinScopeKey((payload as SavedResult).reportId
+        ? `report:${(payload as SavedResult).reportId}`
+        : payload.task
+          ? `task:${payload.task}`
+          : `draft:${crypto.randomUUID()}`);
+      setGridSelection(null);
+      setAllEditMode(false);
       setResult(payload);
       setStage("results");
       setPage("results");
@@ -955,6 +1164,13 @@ export default function App() {
         body: JSON.stringify({ url: taskUrl.trim() }),
       }, setLoadingProgress);
       saved.adopt(payload, payload.title || "GNPS2 Report");
+      setPinScopeKey((payload as SavedResult).reportId
+        ? `report:${(payload as SavedResult).reportId}`
+        : payload.task
+          ? `task:${payload.task}`
+          : `draft:${crypto.randomUUID()}`);
+      setGridSelection(null);
+      setAllEditMode(false);
       if ((payload as SavedResult).saveWarning)
         setError((payload as SavedResult).saveWarning!);
       setResult(payload);
@@ -1042,6 +1258,254 @@ export default function App() {
       })
       .map((item) => item.row);
   }, [result, query, status, sort]);
+  const pinnedRowIds = gridPinPreferences[pinScopeKey]?.rowIds ?? [];
+  const pinnedColumnKeys = gridPinPreferences[pinScopeKey]?.columnKeys ?? [];
+  const gridColumnKeys = useMemo(() => [
+    "stt", "rtDisplay", "compoundName", "adduct", "mzTsv", "fragments",
+    "molecularFormula", "reportedMzErrorPpm", "structure",
+    ...metadataColumns.map((column) => `metadata:${column}`),
+  ], [metadataColumns]);
+  const visibleGridColumnKeys = useMemo(
+    () => orderPinnedColumns(gridColumnKeys, pinnedColumnKeys, ["stt", "compoundName"]),
+    [gridColumnKeys, pinnedColumnKeys],
+  );
+  const orderedFilteredRows = useMemo(
+    () => orderPinnedRows(filtered, pinnedRowIds),
+    [filtered, pinnedRowIds],
+  );
+  const pinnedVisibleRows = useMemo(
+    () => orderedFilteredRows.filter((row) => pinnedRowIds.includes(row.id)),
+    [orderedFilteredRows, pinnedRowIds],
+  );
+  const scrollingVisibleRows = useMemo(
+    () => orderedFilteredRows.filter((row) => !pinnedRowIds.includes(row.id)),
+    [orderedFilteredRows, pinnedRowIds],
+  );
+  const gridColumnCount = visibleGridColumnKeys.length;
+  useEffect(() => {
+    const head = gridHeadRef.current;
+    if (!head) return;
+    const measure = () => {
+      const headerHeight = head.getBoundingClientRect().height;
+      setGridHeaderHeight((current) => Math.abs(current - headerHeight) < 0.5 ? current : headerHeight);
+      let top = headerHeight;
+      const offsets: Record<string, number> = {};
+      for (const row of pinnedVisibleRows) {
+        offsets[row.id] = top;
+        top += pinnedGridRowRefs.current.get(row.id)?.getBoundingClientRect().height ?? 44;
+      }
+      setPinnedGridRowOffsets((current) => {
+        const keys = new Set([...Object.keys(current), ...Object.keys(offsets)]);
+        for (const key of keys) if (Math.abs((current[key] ?? -1) - (offsets[key] ?? -1)) >= 0.5) return offsets;
+        return current;
+      });
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(head);
+    for (const row of pinnedVisibleRows) {
+      const element = pinnedGridRowRefs.current.get(row.id);
+      if (element) observer.observe(element);
+    }
+    return () => observer.disconnect();
+  }, [pinnedVisibleRows, visibleGridColumnKeys, columnWidths]);
+  const columnWidth = (key: string) =>
+    columnWidths[key] ?? (key.startsWith("metadata:") ? 82 : defaultColumnWidths[key] ?? 82);
+  const pinnedGridColumnLeft = (key: string) => {
+    const index = visibleGridColumnKeys.indexOf(key);
+    if (index < 0 || (index > 1 && !pinnedColumnKeys.includes(key))) return undefined;
+    return 34 + visibleGridColumnKeys.slice(0, index).reduce((width, precedingKey) => width + columnWidth(precedingKey), 0);
+  };
+  const gridColumnClass = (key: string) => [
+    key === "stt" ? "sticky-index" : "",
+    key === "compoundName" ? "sticky-compound" : "",
+    pinnedGridColumnLeft(key) != null ? "grid-column-pinned" : "",
+  ].filter(Boolean).join(" ");
+  const gridColumnStyle = (key: string) => {
+    const left = pinnedGridColumnLeft(key);
+    return left == null ? undefined : { left };
+  };
+  const columnResizer = (key: string, label: string) => (
+    <span
+      className="column-resize-handle"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label={`Đổi độ rộng cột ${label}`}
+      aria-valuenow={columnWidth(key)}
+      tabIndex={0}
+      onPointerDown={(event) => beginColumnResize(key, event)}
+      onPointerMove={moveColumnResize}
+      onPointerUp={finishColumnResize}
+      onPointerCancel={finishColumnResize}
+      onKeyDown={(event) => resizeColumnByKeyboard(key, event)}
+      onClick={(event) => event.stopPropagation()}
+    />
+  );
+  const selectGridCell = (
+    row: number,
+    column: number,
+    event: ReactPointerEvent<HTMLElement>,
+  ) => {
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    if (target?.closest("button") || (target?.closest("input,textarea,select") && !(event.ctrlKey || event.metaKey || event.shiftKey))) return;
+    event.preventDefault();
+    tableWrapRef.current?.focus({ preventScroll: true });
+    setCopyMessage("");
+    const point = { row, column };
+    if (event.ctrlKey || event.metaKey) {
+      dragSelectionActiveRef.current = false;
+      dragAnchorRef.current = null;
+      setGridSelection((current) => toggleGridCellSelection(current, row, column));
+      return;
+    }
+    const anchor = event.shiftKey && gridSelection ? gridSelection.anchor : point;
+    dragAnchorRef.current = anchor;
+    dragSelectionActiveRef.current = true;
+    setGridSelection({ anchor, focus: point });
+  };
+  const handleGridEditorPointerDown = (row: number, column: number, event: ReactPointerEvent<HTMLInputElement>) => {
+    event.stopPropagation();
+    if (event.ctrlKey || event.metaKey || event.shiftKey) {
+      selectGridCell(row, column, event);
+    }
+  };
+  const extendGridDrag = (row: number, column: number, event: ReactPointerEvent<HTMLTableCellElement>) => {
+    if (!dragSelectionActiveRef.current || !dragAnchorRef.current || event.buttons === 0) return;
+    event.preventDefault();
+    setGridSelection({ anchor: dragAnchorRef.current, focus: { row, column } });
+  };
+  const selectGridColumn = (column: number) => {
+    if (!filtered.length) return;
+    tableWrapRef.current?.focus({ preventScroll: true });
+    setCopyMessage("");
+    setGridSelection(makeGridColumnSelection(filtered.length, column));
+  };
+  const selectGridRow = (row: number) => {
+    tableWrapRef.current?.focus({ preventScroll: true });
+    setCopyMessage("");
+    setGridSelection(makeGridRowSelection(row, gridColumnCount));
+  };
+  const beginColumnResize = (key: string, event: ReactPointerEvent<HTMLSpanElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    columnResizeRef.current = { key, startX: event.clientX, startWidth: columnWidth(key) };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+  const moveColumnResize = (event: ReactPointerEvent<HTMLSpanElement>) => {
+    const session = columnResizeRef.current;
+    if (!session) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const nextWidth = Math.max(minColumnWidth, Math.min(maxColumnWidth, session.startWidth + event.clientX - session.startX));
+    setColumnWidths((current) => ({ ...current, [session.key]: nextWidth }));
+  };
+  const finishColumnResize = (event: ReactPointerEvent<HTMLSpanElement>) => {
+    event.stopPropagation();
+    columnResizeRef.current = null;
+  };
+  const resizeColumnByKeyboard = (key: string, event: KeyboardEvent<HTMLSpanElement>) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    event.stopPropagation();
+    const change = event.key === "ArrowLeft" ? -8 : 8;
+    setColumnWidths((current) => ({
+      ...current,
+      [key]: Math.max(minColumnWidth, Math.min(maxColumnWidth, columnWidth(key) + change)),
+    }));
+  };
+  const isGridCellSelected = (row: number, column: number) =>
+    cellIsSelected(gridSelection, row, column);
+  const isGridRowSelected = (row: number) => rowIsSelected(gridSelection, row);
+  const selectedGridTargets = selectionRowAndColumnIndexes(
+    gridSelection,
+    orderedFilteredRows.length,
+    visibleGridColumnKeys.length,
+  );
+  const selectedPinRowIds = selectedGridTargets.rows
+    .map((index) => orderedFilteredRows[index]?.id)
+    .filter((id): id is string => Boolean(id));
+  const selectedPinColumnKeys = selectedGridTargets.columns
+    .map((index) => visibleGridColumnKeys[index])
+    .filter((key) => key && key !== "stt" && key !== "compoundName");
+  const selectedRowsArePinned = selectedPinRowIds.length > 0 && selectedPinRowIds.every((id) => pinnedRowIds.includes(id));
+  const selectedColumnsArePinned = selectedPinColumnKeys.length > 0 && selectedPinColumnKeys.every((key) => pinnedColumnKeys.includes(key));
+  const updateCurrentGridPins = (patch: Partial<ReportGridPins>) => {
+    setGridPinPreferences((current) => ({
+      ...current,
+      [pinScopeKey]: {
+        rowIds: current[pinScopeKey]?.rowIds ?? [],
+        columnKeys: current[pinScopeKey]?.columnKeys ?? [],
+        ...patch,
+      },
+    }));
+  };
+  const toggleSelectedRowsPin = () => {
+    if (!selectedPinRowIds.length) return;
+    const current = new Set(pinnedRowIds);
+    if (selectedRowsArePinned) selectedPinRowIds.forEach((id) => current.delete(id));
+    else selectedPinRowIds.forEach((id) => current.add(id));
+    updateCurrentGridPins({ rowIds: [...current] });
+    setGridSelection(null);
+  };
+  const toggleSelectedColumnsPin = () => {
+    if (!selectedPinColumnKeys.length) return;
+    const current = new Set(pinnedColumnKeys);
+    if (selectedColumnsArePinned) selectedPinColumnKeys.forEach((key) => current.delete(key));
+    else selectedPinColumnKeys.forEach((key) => current.add(key));
+    updateCurrentGridPins({ columnKeys: [...current] });
+    setGridSelection(null);
+  };
+  const unpinAllGridItems = () => {
+    updateCurrentGridPins({ rowIds: [], columnKeys: [] });
+    setGridSelection(null);
+  };
+  const copyGridSelection = async () => {
+    const copied = selectionToTsv(orderedFilteredRows, gridSelection, metadataColumns, visibleGridColumnKeys);
+    if (!copied) return;
+    try {
+      await navigator.clipboard.writeText(copied.text);
+      setCopyMessage(`Đã sao chép ${copied.rowCount} hàng × ${copied.columnCount} cột.`);
+    } catch {
+      setCopyMessage("Không thể truy cập clipboard. Hãy cho phép trình duyệt sao chép dữ liệu.");
+    }
+  };
+  const handleGridKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    const target = event.target;
+    const isEditor = target instanceof HTMLElement && (
+      target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)
+    );
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c") {
+      if (isEditor || !gridSelection) return;
+      event.preventDefault();
+      void copyGridSelection();
+      return;
+    }
+    if (isEditor || !gridSelection || !orderedFilteredRows.length) return;
+    if (event.key === "Tab") {
+      const current = gridSelection.focus.row * gridColumnCount + gridSelection.focus.column;
+      const next = current + (event.shiftKey ? -1 : 1);
+      if (next < 0 || next >= orderedFilteredRows.length * gridColumnCount) return;
+      event.preventDefault();
+      const point = { row: Math.floor(next / gridColumnCount), column: next % gridColumnCount };
+      setGridSelection({ anchor: point, focus: point });
+      return;
+    }
+    if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key)) return;
+    event.preventDefault();
+    const deltaByKey: Record<string, [number, number]> = {
+      ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1],
+    };
+    const delta = deltaByKey[event.key] ?? [0, 0];
+    setGridSelection(moveGridSelection(
+      gridSelection,
+      delta[0],
+      delta[1],
+      orderedFilteredRows.length,
+      gridColumnCount,
+      event.shiftKey,
+    ));
+  };
   const compareUrl = result ? gnpsCompareUrl(result, gnpsUrl || taskUrl) : "";
   const engineLabel =
     engineStatus === "ready"
@@ -1064,7 +1528,10 @@ export default function App() {
       sort={sort}
       menuOpen={sortMenuOpen === column}
       onMenu={setSortMenuOpen}
-      onSort={setSort}
+      onSort={(nextSort) => {
+        setGridSelection(null);
+        setSort(nextSort);
+      }}
     />
   );
   function update(id: string, patch: Partial<MatchRow>) {
@@ -1079,14 +1546,184 @@ export default function App() {
         : current,
     );
   }
-  function updateDetail(patch: Partial<MatchRow>) {
-    if (!detailRow) return;
-    update(detailRow.id, patch);
-    setDetailRow({ ...detailRow, ...patch });
+  function updateMetadata(id: string, column: string, value: string | number | null) {
+    setResult((current) => current ? {
+      ...current,
+      rows: current.rows.map((row) => row.id === id
+        ? { ...row, sourceMetadata: { ...row.sourceMetadata, [column]: value } }
+        : row),
+    } : current);
   }
+  function saveCompoundName(id: string) {
+    const compoundName = compoundDraft.trim();
+    update(id, { compoundName });
+    setDetailRow((current) =>
+      current?.id === id ? { ...current, compoundName } : current,
+    );
+    setGridSelection(null);
+    setEditingCompoundId(null);
+  }
+  const pinnedColumnIndicator = (key: string) => pinnedColumnKeys.includes(key)
+    ? <span className="grid-pin-indicator" role="img" aria-label="Cột đang ghim" title="Cột đang ghim">{icons.pin}</span>
+    : null;
+  const renderSortableGridHeader = (
+    key: string,
+    index: number,
+    label: string,
+    subtitle: string,
+    kind: SortKind,
+  ) => (
+    <th
+      className={`${gridColumnClass(key)} sortable-column grid-column-header`}
+      style={gridColumnStyle(key)}
+      onClick={() => selectGridColumn(index)}
+    >
+      {sortableHeader(key, label, subtitle, kind)}
+      {pinnedColumnIndicator(key)}
+      {columnResizer(key, label)}
+    </th>
+  );
+  const renderGridColumnHeader = (key: string, index: number) => {
+    if (key === "stt") return (
+      <th className={`${gridColumnClass(key)} grid-column-header`} style={gridColumnStyle(key)} onClick={() => selectGridColumn(index)} title="Chọn cột số thứ tự để sao chép">
+        <small className="table-heading-en">No.</small><span className="table-heading-vn">STT</span>
+        {columnResizer(key, "STT")}
+      </th>
+    );
+    if (key === "rtDisplay") return renderSortableGridHeader(key, index, "Thời gian lưu", "tR (min)", "number");
+    if (key === "compoundName") return renderSortableGridHeader(key, index, "Tên hoạt chất dự đoán", "Compound name", "text");
+    if (key === "adduct") return renderSortableGridHeader(key, index, "Ion / chất cộng", "Ion / adduct", "text");
+    if (key === "mzTsv") return renderSortableGridHeader(key, index, "Ion tiền chất", "Precursor m/z", "number");
+    if (key === "fragments") return renderSortableGridHeader(key, index, "Mảnh vỡ", "Fragments (m/z)", "text");
+    if (key === "molecularFormula") return renderSortableGridHeader(key, index, "Công thức phân tử", "Molecular formula", "text");
+    if (key === "reportedMzErrorPpm") return renderSortableGridHeader(key, index, "Sai số MZ", "MZ error (ppm)", "number");
+    if (key === "structure") return (
+      <th className={`${gridColumnClass(key)} grid-column-header`} style={gridColumnStyle(key)} onClick={() => selectGridColumn(index)}>
+        <small className="table-heading-en">Structure</small><span className="table-heading-vn">Cấu trúc phân tử</span>
+        {pinnedColumnIndicator(key)}{columnResizer(key, "cấu trúc phân tử")}
+      </th>
+    );
+    const column = key.slice("metadata:".length);
+    return (
+      <th
+        className={`metadata-heading ${gridColumnClass(key)} sortable-column grid-column-header`}
+        key={key}
+        title={column}
+        style={gridColumnStyle(key)}
+        onClick={() => selectGridColumn(index)}
+      >
+        {sortableHeader(`metadata:${column}`, metadataHeaderLabel(column), column, metadataSortKinds.get(column) ?? "text")}
+        {pinnedColumnIndicator(key)}{columnResizer(key, metadataHeaderLabel(column))}
+      </th>
+    );
+  };
+  const gridCellStyle = (key: string, row: MatchRow, pinnedRow: boolean): CSSProperties => {
+    const style: CSSProperties = { ...(gridColumnStyle(key) ?? {}) };
+    if (pinnedRow) {
+      const fallbackOffset = gridHeaderHeight + Math.max(0, pinnedVisibleRows.findIndex((item) => item.id === row.id)) * 44;
+      style.top = pinnedGridRowOffsets[row.id] ?? fallbackOffset;
+    }
+    return style;
+  };
+  const renderGridDataCell = (
+    row: MatchRow,
+    rowIndex: number,
+    key: string,
+    columnIndex: number,
+    pinnedRow: boolean,
+  ) => {
+    const selected = isGridCellSelected(rowIndex, columnIndex);
+    const pinnedClassName = `${gridColumnClass(key)} ${pinnedRow ? "grid-row-pinned-cell" : ""}`;
+    const style = gridCellStyle(key, row, pinnedRow);
+    const pointerProps = {
+      onPointerDown: (event: ReactPointerEvent<HTMLTableCellElement>) => selectGridCell(rowIndex, columnIndex, event),
+      onPointerEnter: (event: ReactPointerEvent<HTMLTableCellElement>) => extendGridDrag(rowIndex, columnIndex, event),
+    };
+    const selectionClassName = selected ? "grid-cell-selected" : "";
+    if (key === "stt") return (
+      <td
+        className={`mono faint grid-cell grid-row-header ${pinnedClassName} ${isGridRowSelected(rowIndex) ? "grid-cell-selected" : ""}`}
+        style={style}
+        onClick={() => selectGridRow(rowIndex)}
+        title={pinnedRow ? "Hàng đang ghim. Chọn hàng để sao chép" : "Chọn hàng để sao chép"}
+      >
+        {rowIndex + 1}{pinnedRow && <span className="grid-pin-indicator" role="img" aria-label="Hàng đang ghim" title="Hàng đang ghim">{icons.pin}</span>}
+      </td>
+    );
+    if (key === "rtDisplay") return (
+      <td className={`rt-cell grid-cell ${pinnedClassName} ${selectionClassName}`} style={style} title={row.rtDisplay} {...pointerProps}>
+        {allEditMode
+          ? <GridEditInput className="grid-edit-input" value={row.rtDisplay} aria-label={`Sửa thời gian lưu dòng ${rowIndex + 1}`} onPointerDown={(event) => handleGridEditorPointerDown(rowIndex, columnIndex, event)} onChange={(value) => update(row.id, { rtDisplay: String(value ?? "") })} />
+          : <span className="readonly-cell-content mono">{row.rtDisplay || "—"}</span>}
+      </td>
+    );
+    if (key === "compoundName") return (
+      <td className={`wrapping-cell compound-cell grid-cell ${pinnedClassName} ${selectionClassName}`} style={style} title={row.compoundName} {...pointerProps}>
+        <input className="grid-edit-input compound-name-input" value={row.compoundName} aria-label={`Tên hoạt chất dòng ${rowIndex + 1}`} onPointerDown={(event) => handleGridEditorPointerDown(rowIndex, columnIndex, event)} onChange={(event) => {
+          update(row.id, { compoundName: event.target.value });
+          setDetailRow((current) => current?.id === row.id ? { ...current, compoundName: event.target.value } : current);
+        }} />
+      </td>
+    );
+    if (key === "adduct") return (
+      <td className={`grid-cell ${pinnedClassName} ${selectionClassName}`} style={style} title={row.adduct} {...pointerProps}>
+        {allEditMode ? <GridEditInput className="grid-edit-input" value={row.adduct} aria-label={`Sửa ion / chất cộng dòng ${rowIndex + 1}`} onPointerDown={(event) => handleGridEditorPointerDown(rowIndex, columnIndex, event)} onChange={(value) => update(row.id, { adduct: String(value ?? "") })} /> : <span className="readonly-cell-content mono">{row.adduct || "—"}</span>}
+      </td>
+    );
+    if (key === "mzTsv") return (
+      <td className={`grid-cell ${pinnedClassName} ${selectionClassName}`} style={style} title={row.mzTsv == null ? "" : String(row.mzTsv)} {...pointerProps}>
+        {allEditMode ? <GridEditInput className="grid-edit-input mono" type="number" value={row.mzTsv} aria-label={`Sửa ion tiền chất dòng ${rowIndex + 1}`} onPointerDown={(event) => handleGridEditorPointerDown(rowIndex, columnIndex, event)} onChange={(value) => update(row.id, { mzTsv: Number(value) || 0 })} /> : <span className="readonly-cell-content mono">{row.mzTsv ?? "—"}</span>}
+      </td>
+    );
+    if (key === "fragments") return (
+      <td className={`wrapping-cell fragments-cell grid-cell ${pinnedClassName} ${selectionClassName}`} style={style} title={row.fragments} {...pointerProps}>
+        {allEditMode ? <GridEditInput className="grid-edit-input mono" value={row.fragments} aria-label={`Sửa mảnh vỡ dòng ${rowIndex + 1}`} onPointerDown={(event) => handleGridEditorPointerDown(rowIndex, columnIndex, event)} onChange={(value) => update(row.id, { fragments: String(value ?? "") })} /> : <span className="readonly-cell-content mono">{row.fragments || "—"}</span>}
+      </td>
+    );
+    if (key === "molecularFormula") return (
+      <td className={`formula-cell grid-cell ${pinnedClassName} ${selectionClassName}`} style={style} title={row.molecularFormula} {...pointerProps}>
+        {allEditMode ? <GridEditInput className="grid-edit-input mono" value={row.molecularFormula} aria-label={`Sửa công thức phân tử dòng ${rowIndex + 1}`} onPointerDown={(event) => handleGridEditorPointerDown(rowIndex, columnIndex, event)} onChange={(value) => update(row.id, { molecularFormula: String(value ?? "") })} /> : <span className="readonly-cell-content mono">{row.molecularFormula || "—"}</span>}
+      </td>
+    );
+    if (key === "reportedMzErrorPpm") return (
+      <td className={`ppm-cell grid-cell ${pinnedClassName} ${selectionClassName}`} style={style} title={row.reportedMzErrorPpm == null ? "" : String(row.reportedMzErrorPpm)} {...pointerProps}>
+        {allEditMode ? <GridEditInput className="grid-edit-input mono" type="number" value={row.reportedMzErrorPpm} aria-label={`Sửa sai số MZ dòng ${rowIndex + 1}`} onPointerDown={(event) => handleGridEditorPointerDown(rowIndex, columnIndex, event)} onChange={(value) => update(row.id, { reportedMzErrorPpm: typeof value === "number" ? value : null })} /> : <span className="readonly-cell-content mono">{row.reportedMzErrorPpm ?? "—"}</span>}
+      </td>
+    );
+    if (key === "structure") return (
+      <td className={`structure-cell grid-cell ${pinnedClassName} ${selectionClassName}`} style={style} title={row.structureUrl || "Chưa tra cứu"} {...pointerProps}>
+        {row.structureData ? <button className="structure-preview" type="button" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => {
+          event.stopPropagation();
+          setDetailRow(row);
+        }} aria-label={`Xem chi tiết ${row.compoundName}`}>
+          <img loading="lazy" src={row.structureData} alt={`Cấu trúc ${row.compoundName}`} /><small>Xem chi tiết</small>
+        </button> : <span>Chưa tra cứu</span>}
+      </td>
+    );
+    const column = key.slice("metadata:".length);
+    return (
+      <MetadataCell
+        key={key}
+        value={row.sourceMetadata?.[column]}
+        selected={selected}
+        editing={allEditMode}
+        numeric={metadataSortKinds.get(column) === "number"}
+        onChange={(value) => updateMetadata(row.id, column, value)}
+        onPointerDown={pointerProps.onPointerDown}
+        onPointerEnter={pointerProps.onPointerEnter}
+        onEditorPointerDown={(event) => handleGridEditorPointerDown(rowIndex, columnIndex, event)}
+        className={`${pinnedClassName} ${selectionClassName}`}
+        style={style}
+      />
+    );
+  };
   async function openReport(payload: SavedResult, discard = false) {
     if (!discard && saved.dirty()) await saved.saveNow();
+    setGridSelection(null);
+    setAllEditMode(false);
+    setEditingCompoundId(null);
     setResult(payload);
+    setPinScopeKey(payload.reportId ? `report:${payload.reportId}` : `draft:${crypto.randomUUID()}`);
     setReportTitle(payload.title || "GNPS2 Report");
     saved.adopt(payload, payload.title || "GNPS2 Report");
     setStage("results");
@@ -1217,6 +1854,9 @@ export default function App() {
       return;
     }
     if (next === "upload") {
+      setGridSelection(null);
+      setAllEditMode(false);
+      setEditingCompoundId(null);
       setResult(null);
       setStage("upload");
       setTsv(null);
@@ -1849,7 +2489,10 @@ export default function App() {
                         aria-label="Tìm trong kết quả phân tích"
                         placeholder="Tìm trong tất cả trường dữ liệu…"
                         value={query}
-                        onChange={(e) => setQuery(e.target.value)}
+                        onChange={(e) => {
+                          setGridSelection(null);
+                          setQuery(e.target.value);
+                        }}
                       />
                     </div>
                     <div className="filters">
@@ -1864,7 +2507,10 @@ export default function App() {
                       ).map((value) => (
                         <button
                           className={status === value ? "active" : ""}
-                          onClick={() => setStatus(value)}
+                          onClick={() => {
+                            setGridSelection(null);
+                            setStatus(value);
+                          }}
                           key={value}
                         >
                           {
@@ -1879,243 +2525,144 @@ export default function App() {
                         </button>
                       ))}
                     </div>
+                    <button
+                      className={`table-copy-button table-edit-all-button ${allEditMode ? "active" : ""}`}
+                      type="button"
+                      aria-pressed={allEditMode}
+                      onClick={() => setAllEditMode((active) => !active)}
+                      title={allEditMode ? "Kết thúc chỉnh sửa các trường" : "Mở chỉnh sửa tất cả trường dữ liệu"}
+                    >
+                      <span className="table-action-label">
+                        <b>{allEditMode ? "Finish editing" : "Edit all"}</b>
+                        <small>{allEditMode ? "Xong chỉnh sửa" : "Sửa tất cả"}</small>
+                      </span>
+                    </button>
+                    <button
+                      className="table-copy-button table-pin-button"
+                      type="button"
+                      disabled={!selectedPinRowIds.length}
+                      onClick={toggleSelectedRowsPin}
+                      aria-label={selectedRowsArePinned ? "Bỏ ghim hàng đang chọn" : "Ghim hàng đang chọn"}
+                      title={selectedRowsArePinned ? "Bỏ ghim các hàng đang chọn" : "Ghim các hàng đang chọn"}
+                    >
+                      {icons.pin}<span className="table-action-label"><b>{selectedRowsArePinned ? "Unpin rows" : "Pin rows"}</b><small>{selectedRowsArePinned ? "Bỏ ghim hàng" : "Ghim hàng"}</small></span>
+                    </button>
+                    <button
+                      className="table-copy-button table-pin-button"
+                      type="button"
+                      disabled={!selectedPinColumnKeys.length}
+                      onClick={toggleSelectedColumnsPin}
+                      aria-label={selectedColumnsArePinned ? "Bỏ ghim cột đang chọn" : "Ghim cột đang chọn"}
+                      title={selectedColumnsArePinned ? "Bỏ ghim các cột đang chọn" : "Ghim các cột đang chọn"}
+                    >
+                      {icons.pin}<span className="table-action-label"><b>{selectedColumnsArePinned ? "Unpin columns" : "Pin columns"}</b><small>{selectedColumnsArePinned ? "Bỏ ghim cột" : "Ghim cột"}</small></span>
+                    </button>
+                    <button
+                      className="table-copy-button table-pin-button"
+                      type="button"
+                      disabled={!pinnedRowIds.length && !pinnedColumnKeys.length}
+                      onClick={unpinAllGridItems}
+                      title="Bỏ ghim hàng và cột đã ghim thêm; STT và tên hoạt chất vẫn cố định"
+                    >
+                      <span className="table-action-label"><b>Unpin all</b><small>Bỏ ghim tất cả</small></span>
+                    </button>
+                    <button
+                      className="table-copy-button"
+                      type="button"
+                      disabled={!gridSelection}
+                      onClick={() => void copyGridSelection()}
+                      title="Sao chép vùng đang chọn để dán vào Excel"
+                    >
+                      {icons.copy}<span className="table-action-label"><b>Copy selection</b><small>Sao chép vùng chọn</small></span>
+                    </button>
                     <span className="result-count">
                       {filtered.length} kết quả · {metadataColumns.length}{" "}
                       trường nguồn
                     </span>
                   </div>
-                  <div className="table-wrap result-table-wrap">
+                  {copyMessage && <span className="table-copy-status" role="status" aria-live="polite">{copyMessage}</span>}
+                  <div
+                    className="table-wrap result-table-wrap"
+                    ref={tableWrapRef}
+                    tabIndex={0}
+                    onKeyDown={handleGridKeyDown}
+                    aria-label="Bảng kết quả. Chọn ô, tiêu đề để chọn cột hoặc số thứ tự để chọn hàng; nhấn Ctrl+C để sao chép."
+                  >
                     <table className="result-table">
-                      <thead>
+                      <colgroup>
+                        <col style={{ width: 34 }} />
+                        {visibleGridColumnKeys.map((key) => <col key={key} style={{ width: columnWidth(key) }} />)}
+                      </colgroup>
+                      <thead ref={gridHeadRef}>
                         <tr>
                           <th className="sticky-select">
                             <input
                               type="checkbox"
                               aria-label="Chọn tất cả dòng báo cáo"
-                              checked={
-                                selectedCount === result.rows.length &&
-                                !!selectedCount
-                              }
-                              onChange={(e) =>
+                              title="Chọn các dòng sẽ đưa vào báo cáo"
+                              checked={selectedCount === result.rows.length && !!selectedCount}
+                              onChange={(event) => {
+                                setGridSelection(null);
                                 setResult({
                                   ...result,
-                                  rows: result.rows.map((r) => ({
-                                    ...r,
-                                    selected: e.target.checked,
-                                  })),
-                                })
-                              }
+                                  rows: result.rows.map((row) => ({ ...row, selected: event.target.checked })),
+                                });
+                              }}
                             />
                           </th>
-                          <th className="sticky-index">
-                            <span className="table-heading-vn">STT</span>
-                            <small>Số thứ tự</small>
-                          </th>
-                          <th className="sortable-column">
-                            {sortableHeader(
-                              "rtDisplay",
-                              "Thời gian lưu",
-                              "tR (min)",
-                              "number",
-                            )}
-                          </th>
-                          <th className="sticky-compound sortable-column">
-                            {sortableHeader(
-                              "compoundName",
-                              "Tên hoạt chất dự đoán",
-                              "Compound name",
-                              "text",
-                            )}
-                          </th>
-                          <th className="sortable-column">
-                            {sortableHeader(
-                              "adduct",
-                              "Ion / chất cộng",
-                              "Ion / adduct",
-                              "text",
-                            )}
-                          </th>
-                          <th className="sortable-column">
-                            {sortableHeader(
-                              "mzTsv",
-                              "Ion tiền chất",
-                              "Precursor m/z",
-                              "number",
-                            )}
-                          </th>
-                          <th className="sortable-column">
-                            {sortableHeader(
-                              "fragments",
-                              "Mảnh vỡ",
-                              "Fragments (m/z)",
-                              "text",
-                            )}
-                          </th>
-                          <th className="sortable-column">
-                            {sortableHeader(
-                              "molecularFormula",
-                              "Công thức phân tử",
-                              "Molecular formula · ppm",
-                              "text",
-                            )}
-                          </th>
-                          <th>
-                            <span className="table-heading-vn">
-                              Cấu trúc phân tử
-                            </span>
-                            <small>Structure</small>
-                          </th>
-                          {metadataColumns.map((column) => (
-                            <th
-                              className="metadata-heading sortable-column"
-                              key={column}
-                              title={column}
-                            >
-                              {sortableHeader(
-                                `metadata:${column}`,
-                                metadataHeaderLabel(column),
-                                column,
-                                metadataSortKinds.get(column) ?? "text",
-                              )}
-                            </th>
-                          ))}
+                          {visibleGridColumnKeys.map((key, index) => <Fragment key={key}>{renderGridColumnHeader(key, index)}</Fragment>)}
                         </tr>
                       </thead>
-                      <tbody>
-                        {filtered.map((row, index) => (
-                          <tr
-                            key={row.id}
-                            className={!row.selected ? "muted" : ""}
-                          >
-                            <td className="sticky-select">
-                              <input
-                                type="checkbox"
-                                aria-label={`Chọn ${row.compoundName}`}
-                                checked={row.selected}
-                                onChange={(e) =>
-                                  update(row.id, { selected: e.target.checked })
-                                }
-                              />
-                            </td>
-                            <td className="mono faint sticky-index">
-                              {index + 1}
-                            </td>
-                            <td className="rt-cell">
-                              <input
-                                className="cell-input mono"
-                                aria-label={`Thời gian lưu · dòng ${index + 1}`}
-                                value={row.rtDisplay}
-                                onChange={(e) =>
-                                  update(row.id, { rtDisplay: e.target.value })
-                                }
-                              />
-                            </td>
-                            <td className="wrapping-cell compound-cell sticky-compound">
-                              <textarea
-                                className="cell-input wrapping-input compound"
-                                rows={1}
-                                aria-label={`Tên hoạt chất · dòng ${index + 1}`}
-                                value={row.compoundName}
-                                onChange={(e) =>
-                                  update(row.id, {
-                                    compoundName: e.target.value,
-                                  })
-                                }
-                              />
-                            </td>
-                            <td>
-                              <input
-                                className="cell-input mono"
-                                aria-label={`Ion / chất cộng · dòng ${index + 1}`}
-                                value={row.adduct}
-                                onChange={(e) =>
-                                  update(row.id, { adduct: e.target.value })
-                                }
-                              />
-                            </td>
-                            <td>
-                              <input
-                                className="cell-input mono"
-                                type="number"
-                                step="any"
-                                aria-label={`Ion tiền chất · dòng ${index + 1}`}
-                                value={row.mzTsv}
-                                onChange={(e) =>
-                                  update(row.id, {
-                                    mzTsv: Number(e.target.value),
-                                  })
-                                }
-                              />
-                            </td>
-                            <td className="wrapping-cell fragments-cell">
-                              <textarea
-                                className="cell-input wrapping-input"
-                                rows={1}
-                                aria-label={`Mảnh vỡ · dòng ${index + 1}`}
-                                value={row.fragments}
-                                placeholder="—"
-                                onChange={(e) =>
-                                  update(row.id, { fragments: e.target.value })
-                                }
-                              />
-                            </td>
-                            <td className="formula-cell">
-                              <input
-                                className="cell-input mono formula-value"
-                                aria-label={`Công thức phân tử · dòng ${index + 1}`}
-                                value={row.molecularFormula}
-                                onChange={(e) =>
-                                  update(row.id, {
-                                    molecularFormula: e.target.value,
-                                  })
-                                }
-                              />
-                              <label className="ppm-editor">
-                                <input
-                                  className="cell-input mono"
-                                  type="number"
-                                  step="any"
-                                  value={row.reportedMzErrorPpm ?? ""}
-                                  placeholder="—"
-                                  onChange={(e) =>
-                                    update(row.id, {
-                                      reportedMzErrorPpm:
-                                        e.target.value === ""
-                                          ? null
-                                          : Number(e.target.value),
-                                    })
-                                  }
-                                />
-                                <span>ppm</span>
-                              </label>
-                            </td>
-                            <td className="structure-cell">
-                              {row.structureData ? (
-                                <button
-                                  className="structure-preview"
-                                  type="button"
-                                  onClick={() => setDetailRow(row)}
-                                  aria-label={`Xem chi tiết ${row.compoundName}`}
-                                >
-                                  <img
-                                    loading="lazy"
-                                    src={row.structureData}
-                                    alt={`Cấu trúc ${row.compoundName}`}
+                      {pinnedVisibleRows.length > 0 && (
+                        <tbody className="grid-pinned-rows">
+                          {pinnedVisibleRows.map((row) => {
+                            const index = orderedFilteredRows.findIndex((item) => item.id === row.id);
+                            return (
+                              <tr
+                                key={row.id}
+                                ref={(element) => {
+                                  if (element) pinnedGridRowRefs.current.set(row.id, element);
+                                  else pinnedGridRowRefs.current.delete(row.id);
+                                }}
+                                className={`grid-row-pinned ${!row.selected ? "muted" : ""}`}
+                              >
+                                <td className="sticky-select grid-row-pinned-cell" style={{ top: pinnedGridRowOffsets[row.id] ?? gridHeaderHeight }}>
+                                  <input
+                                    type="checkbox"
+                                    aria-label={`Chọn ${row.compoundName}`}
+                                    checked={row.selected}
+                                    onChange={(event) => {
+                                      setGridSelection(null);
+                                      update(row.id, { selected: event.target.checked });
+                                    }}
                                   />
-                                  <small>Xem chi tiết</small>
-                                </button>
-                              ) : (
-                                <span>Chưa tra cứu</span>
-                              )}
-                            </td>
-                            {metadataColumns.map((column) => (
-                              <MetadataCell
-                                key={column}
-                                value={row.sourceMetadata?.[column]}
-                              />
-                            ))}
-                          </tr>
-                        ))}
+                                </td>
+                                {visibleGridColumnKeys.map((key, columnIndex) => <Fragment key={key}>{renderGridDataCell(row, index, key, columnIndex, true)}</Fragment>)}
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      )}
+                      <tbody>
+                        {scrollingVisibleRows.map((row) => {
+                          const index = orderedFilteredRows.findIndex((item) => item.id === row.id);
+                          return (
+                            <tr key={row.id} className={!row.selected ? "muted" : ""}>
+                              <td className="sticky-select">
+                                <input
+                                  type="checkbox"
+                                  aria-label={`Chọn ${row.compoundName}`}
+                                  checked={row.selected}
+                                  onChange={(event) => {
+                                    setGridSelection(null);
+                                    update(row.id, { selected: event.target.checked });
+                                  }}
+                                />
+                              </td>
+                              {visibleGridColumnKeys.map((key, columnIndex) => <Fragment key={key}>{renderGridDataCell(row, index, key, columnIndex, false)}</Fragment>)}
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                     {!filtered.length && (
@@ -2320,7 +2867,10 @@ export default function App() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            onMouseDown={() => setDetailRow(null)}
+            onMouseDown={() => {
+              setDetailRow(null);
+              setEditingCompoundId(null);
+            }}
           >
             <motion.div
               className="compound-dialog"
@@ -2336,7 +2886,10 @@ export default function App() {
               <button
                 className="dialog-close"
                 type="button"
-                onClick={() => setDetailRow(null)}
+                onClick={() => {
+                  setDetailRow(null);
+                  setEditingCompoundId(null);
+                }}
                 aria-label="Đóng"
               >
                 {icons.close}
@@ -2352,86 +2905,72 @@ export default function App() {
                 )}
               </div>
               <div className="compound-dialog-content">
-                <small>THÔNG TIN HỢP CHẤT · CÓ THỂ CHỈNH SỬA</small>
-                <label className="dialog-name">
-                  <span>Tên hoạt chất</span>
-                  <textarea
-                    id="compound-dialog-title"
-                    rows={2}
-                    value={detailRow.compoundName}
-                    onChange={(e) =>
-                      updateDetail({ compoundName: e.target.value })
-                    }
-                  />
-                </label>
+                <small className="dialog-form-title-en">COMPOUND INFORMATION</small>
+                <small className="dialog-form-title-vn">THÔNG TIN HỢP CHẤT · CHỈ ĐỌC</small>
+                <div className="dialog-name">
+                  <span className="dialog-label-pair"><b>Compound name</b><small>Tên hoạt chất</small></span>
+                  {editingCompoundId === detailRow.id ? (
+                    <div className="dialog-name-editor">
+                      <input
+                        id="compound-dialog-title"
+                        autoFocus
+                        value={compoundDraft}
+                        onChange={(event) => setCompoundDraft(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.preventDefault();
+                            saveCompoundName(detailRow.id);
+                          } else if (event.key === "Escape") {
+                            setEditingCompoundId(null);
+                          }
+                        }}
+                      />
+                      <button type="button" className="dialog-edit-save" onClick={() => saveCompoundName(detailRow.id)}>Lưu</button>
+                      <button type="button" className="dialog-edit-cancel" onClick={() => setEditingCompoundId(null)}>Hủy</button>
+                    </div>
+                  ) : (
+                    <div className="dialog-name-value">
+                      <strong id="compound-dialog-title">{detailRow.compoundName || "—"}</strong>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setGridSelection(null);
+                          setCompoundDraft(detailRow.compoundName);
+                          setEditingCompoundId(detailRow.id);
+                        }}
+                      >Sửa tên</button>
+                    </div>
+                  )}
+                </div>
                 <div className="dialog-fields">
-                  <label>
-                    <span>tR (min)</span>
-                    <input
-                      value={detailRow.rtDisplay}
-                      onChange={(e) =>
-                        updateDetail({ rtDisplay: e.target.value })
-                      }
-                    />
-                  </label>
-                  <label>
-                    <span>Ion/Adduct</span>
-                    <input
-                      value={detailRow.adduct}
-                      onChange={(e) => updateDetail({ adduct: e.target.value })}
-                    />
-                  </label>
-                  <label>
-                    <span>Ion tiền chất (m/z)</span>
-                    <input
-                      type="number"
-                      step="any"
-                      value={detailRow.mzTsv}
-                      onChange={(e) =>
-                        updateDetail({ mzTsv: Number(e.target.value) })
-                      }
-                    />
-                  </label>
-                  <label>
-                    <span>Công thức phân tử</span>
-                    <input
-                      value={detailRow.molecularFormula}
-                      onChange={(e) =>
-                        updateDetail({ molecularFormula: e.target.value })
-                      }
-                    />
-                  </label>
-                  <label>
-                    <span>Sai số ppm</span>
-                    <input
-                      type="number"
-                      step="any"
-                      value={detailRow.reportedMzErrorPpm ?? ""}
-                      placeholder="—"
-                      onChange={(e) =>
-                        updateDetail({
-                          reportedMzErrorPpm:
-                            e.target.value === ""
-                              ? null
-                              : Number(e.target.value),
-                        })
-                      }
-                    />
-                  </label>
-                  <label className="dialog-fragments">
-                    <span>Mảnh vỡ (m/z)</span>
-                    <textarea
-                      rows={4}
-                      value={detailRow.fragments}
-                      onChange={(e) =>
-                        updateDetail({ fragments: e.target.value })
-                      }
-                    />
-                  </label>
+                  <div className="dialog-readonly-field">
+                    <span><b>Retention time</b><small>Thời gian lưu · tR (min)</small></span>
+                    <strong>{detailRow.rtDisplay || "—"}</strong>
+                  </div>
+                  <div className="dialog-readonly-field">
+                    <span><b>Ion / adduct</b><small>Ion / chất cộng</small></span>
+                    <strong>{detailRow.adduct || "—"}</strong>
+                  </div>
+                  <div className="dialog-readonly-field">
+                    <span><b>Precursor m/z</b><small>Ion tiền chất</small></span>
+                    <strong>{detailRow.mzTsv ?? "—"}</strong>
+                  </div>
+                  <div className="dialog-readonly-field">
+                    <span><b>Molecular formula</b><small>Công thức phân tử</small></span>
+                    <strong>{detailRow.molecularFormula || "—"}</strong>
+                  </div>
+                  <div className="dialog-readonly-field">
+                    <span><b>MZ error (ppm)</b><small>Sai số MZ</small></span>
+                    <strong>{detailRow.reportedMzErrorPpm ?? "—"}</strong>
+                  </div>
+                  <div className="dialog-readonly-field dialog-fragments">
+                    <span><b>Fragments (m/z)</b><small>Mảnh vỡ</small></span>
+                    <strong>{detailRow.fragments || "—"}</strong>
+                  </div>
                 </div>
                 <div className="dialog-save-note">
                   {icons.check}
-                  <span>Thay đổi được lưu tự động vào bảng kết quả</span>
+                  <span>Chỉ tên hợp chất có thể chỉnh sửa; thay đổi được tự lưu</span>
                 </div>
               </div>
             </motion.div>
