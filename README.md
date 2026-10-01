@@ -20,6 +20,61 @@ npm run dev
 - Web: `http://localhost:5173`
 - API health: `http://localhost:8787/api/health`
 
+## Project và AI chat nghiên cứu
+
+Sau khi đăng nhập, mở **Project & AI chat** trên thanh điều hướng. Tạo project, ghi mục tiêu nghiên cứu, tạo phiên và thêm báo cáo có sẵn. **Nhập báo cáo mới** từ project sẽ gắn báo cáo vừa nhập vào project đó. Báo cáo cũ không tự gắn project. Một báo cáo thuộc một project; không chuyển ngầm giữa các project.
+
+Mở **Cài đặt AI**, nhập tên provider, Base URL HTTPS của API **OpenAI-compatible Chat Completions** (ví dụ URL gốc kết thúc `/v1`) và API key. Tải catalog hoặc nhập model thủ công; chọn model mặc định. Bật Tools/Stream chỉ khi model và provider hỗ trợ, chọn context/output phù hợp và dùng **Chat thử** để xác minh. Tải catalog thành công không chứng minh chat thành công. Phép thử có thể phát sinh phí và được tính vào hạn mức lượt ngày.
+
+Tạo hội thoại trong phiên rồi chọn phạm vi dòng đang chọn, báo cáo đang mở hoặc các báo cáo trong project. Có nút **AI chat · Project** trên màn báo cáo để chat ngay khi phân tích. Hệ thống đợi autosave, kiểm tra revision, chụp dữ liệu đã lưu và chỉ gửi thông tin có giới hạn vào provider. Model có tools được phép đọc/lọc/tổng hợp/so sánh snapshot; model không có tools chỉ dùng dữ liệu khởi tạo và phải nêu giới hạn. AI không tự sửa báo cáo hoặc xác nhận định danh hợp chất.
+
+- Project, phiên, hội thoại, tin nhắn, nguồn/revision, request state và usage được lưu PostgreSQL. Phiên nghiên cứu độc lập với cookie đăng nhập.
+- Đổi model chỉ ảnh hưởng lượt tiếp theo. Thứ tự ưu tiên: lượt chat → phiên → project → tài khoản. Giao diện hiển thị provider/model hiệu lực; không tự chuyển provider khi lỗi.
+- Câu hỏi được lưu trước khi gọi provider; lỗi/dừng/gián đoạn vẫn giữ lịch sử. Gửi trùng dùng request ID và fingerprint; không tự gọi lại model khi SSE mất kết nối.
+- Nguồn dữ liệu mở báo cáo/dòng hiện tại; câu trả lời cũ vẫn dựa trên revision và snapshot đã ghi. Lịch sử dài được phân trang; prompt giữ các cặp hỏi/đáp gần nhất và trích đoạn cũ có version/range, không xóa tin nhắn gốc.
+- Có tìm tên hội thoại, đổi tên, archive, xuất Markdown/JSON và xóa riêng hội thoại/snapshot. Xóa chat giữ nguyên báo cáo và sổ hạn mức ngày. Project dùng archive/mở lại; không cung cấp xóa vĩnh viễn cả project/báo cáo.
+- API key mã hóa AES-256-GCM; API không trả key, không lưu key ở browser hay log. Provider phải là HTTPS public, không có credential trong URL, port riêng hoặc redirect; DNS được kiểm tra và ghim cho kết nối để chặn SSRF/rebinding.
+
+### Cấu hình máy chủ AI
+
+Chạy `npm run db:migrate` để áp dụng `0002_research_ai.sql` và `0003_ai_model_pricing.sql` (chỉ thêm bảng/cột/ràng buộc; không chuyển hoặc xóa báo cáo cũ). Khai báo các biến trong `.env.example`:
+
+```text
+AI_ENCRYPTION_KEY=<64 ký tự hex ngẫu nhiên, tương đương 32 byte>
+AI_KEY_VERSION=v1
+AI_ALLOWED_HOSTS=<hostname chính xác, cách nhau bằng dấu phẩy>
+AI_DAILY_REQUESTS=100
+AI_DAILY_TOKEN_BUDGET=500000
+AI_MAX_CONCURRENT=2
+AI_MAX_STORAGE_BYTES=50000000
+AI_TIMEOUT_MS=90000
+```
+
+Tạo khóa bằng `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` rồi lưu vào cấu hình bí mật của máy chủ. Không commit khóa và không dùng SESSION_SECRET làm khóa AI. Khi xoay khóa, đổi `AI_KEY_VERSION`, đặt khóa cũ trong JSON `AI_PREVIOUS_KEYS` theo version để đọc các provider chưa cập nhật; nhập lại API key trong Cài đặt AI để mã hóa bằng version mới trước khi bỏ khóa cũ. Khóa mất sẽ không giải mã được key đã lưu.
+
+`AI_ALLOWED_HOSTS` trống cho phép HTTPS public; nên cấu hình đúng hostname provider khi đưa lên production. API native Responses/Anthropic, provider localhost, OCR/vision và RAG chưa thuộc bản này.
+
+Hạn mức token là dự toán bảo thủ theo ngân sách context và số vòng tools; không hoàn trả dự toán khi lỗi/dừng. Usage thật chỉ hiển thị khi provider cung cấp, còn thiếu ghi không xác định. Chat thử cũng dùng hạn mức. Có thể nhập đơn giá input/output trên 1 triệu token tại từng model. Mỗi lượt lưu phiên bản đơn giá và chi phí ước tính; thiếu đơn giá hoặc usage thì để không xác định. Không tự đổi tiền tệ, không tính riêng cache/reasoning/phụ phí; đối chiếu hóa đơn thực tại provider. Dung lượng giới hạn gồm snapshot, tin nhắn và kết quả tools; có thể xóa hội thoại cũ để giải phóng.
+
+Backend chạy lượt AI trong process với lease/heartbeat DB. Khi restart, lượt hết lease chuyển sang interrupted ở lần truy cập API AI tiếp theo; người dùng tự thử lại. Không có worker bền vững hoặc tự resume qua restart. SSE gửi trạng thái/nội dung đã lưu từng đợt; client tự dùng polling khi SSE lỗi. Khi deploy, cấu hình cookie/origin như xác thực hiện có và kiểm tra proxy SSE không buffering, timeout và cancel trên môi trường thật.
+
+### Kiểm tra riêng bằng dữ liệu mẫu
+
+`scripts/research-preview.ts` tạo DB PGlite trong bộ nhớ và provider giả lập, bind `127.0.0.1:8789`; không đọc dữ liệu DB được cấu hình và không gọi AI thật. Chạy trong terminal thứ nhất:
+
+```text
+npx tsx scripts/research-preview.ts
+```
+
+Terminal PowerShell thứ hai:
+
+```powershell
+$env:DEV_API_TARGET='http://localhost:8789'
+npx vite --host 127.0.0.1 --port 5193
+```
+
+Đăng nhập môi trường QA tại `http://localhost:5193` bằng `research-qa@example.test` / `local-qa-password-123`. Đây là tài khoản giả lập trong bộ nhớ, mất khi dừng process. Thêm provider `https://example.com/v1`, API key bất kỳ, tải `demo-model`, bật Stream và đặt mặc định để kiểm tra. `scripts/research-browser-qa.cjs` dùng Playwright/Chrome có sẵn, kiểm tra thao tác và ghi bằng chứng vào `qa/research-ai/`. Không dùng tài khoản hoặc credential thật trong môi trường QA.
+
 ## Dữ liệu demo
 
 ```bash

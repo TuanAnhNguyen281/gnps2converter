@@ -1,0 +1,10 @@
+ALTER TABLE ai_provider_models ADD COLUMN input_price_per_million numeric(14,6);
+ALTER TABLE ai_provider_models ADD COLUMN output_price_per_million numeric(14,6);
+ALTER TABLE ai_provider_models ADD COLUMN currency text NOT NULL DEFAULT 'USD';
+ALTER TABLE ai_provider_models ADD COLUMN pricing_version integer NOT NULL DEFAULT 0;
+ALTER TABLE ai_usage ADD COLUMN input_price_per_million numeric(14,6);
+ALTER TABLE ai_usage ADD COLUMN output_price_per_million numeric(14,6);
+ALTER TABLE ai_usage ADD COLUMN currency text;
+ALTER TABLE ai_usage ADD COLUMN pricing_version integer;
+ALTER TABLE ai_usage ADD COLUMN estimated_max_cost numeric(18,8);
+ALTER TABLE ai_usage ADD COLUMN estimated_cost numeric(18,8);

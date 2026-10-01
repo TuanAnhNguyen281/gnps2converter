@@ -1,4 +1,12 @@
-import { beforeAll, afterAll, afterEach, describe, it, expect, vi } from "vitest";
+import {
+  beforeAll,
+  afterAll,
+  afterEach,
+  describe,
+  it,
+  expect,
+  vi,
+} from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import supertest from "supertest";
 import { readFile } from "node:fs/promises";
@@ -108,6 +116,18 @@ beforeAll(async () => {
     ),
   );
   let tail = Promise.resolve();
+  await sql.exec(
+    await readFile(
+      new URL("../migrations/0002_research_ai.sql", import.meta.url),
+      "utf8",
+    ),
+  );
+  await sql.exec(
+    await readFile(
+      new URL("../migrations/0003_ai_model_pricing.sql", import.meta.url),
+      "utf8",
+    ),
+  );
   const lock = async () => {
     let release!: () => void;
     const current = new Promise<void>((r) => {
@@ -239,13 +259,18 @@ describe("PostgreSQL-backed accounts, reports and assets", () => {
   });
   it("streams GNPS import, PostgreSQL and Cloudinary progress while retaining JSON mode and idempotent replay", async () => {
     const task = "2515573ac8c24ec8b85f553aad9b440e";
-    const done = '<table><tr><td>Description</td><td>Progress test</td></tr><tr><td>Status</td><td>DONE</td></tr></table>';
-    const library = JSON.stringify([{ "#Scan#": "1", Compound_Name: "Example" }]);
-    const graph = "<graphml><graph><node id=\"1\"/></graph></graphml>";
-    const mockGnps = () => vi.fn()
-      .mockResolvedValueOnce(new Response(done))
-      .mockResolvedValueOnce(new Response(library))
-      .mockResolvedValueOnce(new Response(graph));
+    const done =
+      "<table><tr><td>Description</td><td>Progress test</td></tr><tr><td>Status</td><td>DONE</td></tr></table>";
+    const library = JSON.stringify([
+      { "#Scan#": "1", Compound_Name: "Example" },
+    ]);
+    const graph = '<graphml><graph><node id="1"/></graph></graphml>';
+    const mockGnps = () =>
+      vi
+        .fn()
+        .mockResolvedValueOnce(new Response(done))
+        .mockResolvedValueOnce(new Response(library))
+        .mockResolvedValueOnce(new Response(graph));
     const key = randomUUID();
     vi.stubGlobal("fetch", mockGnps());
     const streamed = await a
@@ -263,21 +288,41 @@ describe("PostgreSQL-backed accounts, reports and assets", () => {
     expect(streamed.status).toBe(200);
     expect(streamed.headers["content-type"]).toContain("text/event-stream");
     const body = streamed.body as string;
-    const events = body.trim().split(/\r?\n\r?\n/).map((block) => {
-      const event = block.match(/^event: (.+)$/m)?.[1];
-      const data = block.match(/^data: (.+)$/m)?.[1];
-      return { event, data: data ? JSON.parse(data) : undefined };
-    });
-    const progress = events.filter((item) => item.event === "progress").map((item) => item.data);
+    const events = body
+      .trim()
+      .split(/\r?\n\r?\n/)
+      .map((block) => {
+        const event = block.match(/^event: (.+)$/m)?.[1];
+        const data = block.match(/^data: (.+)$/m)?.[1];
+        return { event, data: data ? JSON.parse(data) : undefined };
+      });
+    const progress = events
+      .filter((item) => item.event === "progress")
+      .map((item) => item.data);
     const imported = events.find((item) => item.event === "result")?.data;
-    expect(progress.some((item) => item.stage === "matches" && item.current === 1)).toBe(true);
-    expect(progress.some((item) => item.stage === "database" && item.outcome === "success")).toBe(true);
-    expect(progress.some((item) => item.stage === "assets" && item.title.includes("Cloudinary"))).toBe(true);
-    expect(progress.at(-1)).toMatchObject({ stage: "complete", outcome: "success" });
+    expect(
+      progress.some((item) => item.stage === "matches" && item.current === 1),
+    ).toBe(true);
+    expect(
+      progress.some(
+        (item) => item.stage === "database" && item.outcome === "success",
+      ),
+    ).toBe(true);
+    expect(
+      progress.some(
+        (item) => item.stage === "assets" && item.title.includes("Cloudinary"),
+      ),
+    ).toBe(true);
+    expect(progress.at(-1)).toMatchObject({
+      stage: "complete",
+      outcome: "success",
+    });
     expect(imported.reportId).toBeTruthy();
     expect(imported.mediaStatus).toBe("ready");
 
-    const noFetch = vi.fn(() => Promise.reject(new Error("Idempotency replay should not fetch GNPS")));
+    const noFetch = vi.fn(() =>
+      Promise.reject(new Error("Idempotency replay should not fetch GNPS")),
+    );
     vi.stubGlobal("fetch", noFetch);
     const replay = await a
       .post("/api/gnps-task/import?progress=stream")
@@ -296,7 +341,10 @@ describe("PostgreSQL-backed accounts, reports and assets", () => {
     expect(replayEvents[0]).toContain('"stage":"complete"');
     expect(replayEvents.at(-1)).toContain(imported.reportId);
 
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(done.replace("DONE", "RUNNING"))));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response(done.replace("DONE", "RUNNING"))),
+    );
     const failedTask = await a
       .post("/api/gnps-task/import?progress=stream")
       .set("X-CSRF-Token", csrfA)
@@ -309,8 +357,8 @@ describe("PostgreSQL-backed accounts, reports and assets", () => {
         incoming.on("data", (chunk) => (responseBody += chunk));
         incoming.on("end", () => callback(null, responseBody));
       });
-    expect((failedTask.body as string)).toContain('event: error');
-    expect((failedTask.body as string)).toContain('"code":"GNPS_TASK_NOT_DONE"');
+    expect(failedTask.body as string).toContain("event: error");
+    expect(failedTask.body as string).toContain('"code":"GNPS_TASK_NOT_DONE"');
 
     vi.stubGlobal("fetch", mockGnps());
     const legacyJson = await a
@@ -322,8 +370,14 @@ describe("PostgreSQL-backed accounts, reports and assets", () => {
     expect(legacyJson.body.reportId).toBeTruthy();
 
     failUpload = true;
-    const mediaProgress: Array<{ stage: string; outcome?: string; failed?: number }> = [];
-    let partialReport: Awaited<ReturnType<NonNullable<typeof app.reports>["create"]>>;
+    const mediaProgress: Array<{
+      stage: string;
+      outcome?: string;
+      failed?: number;
+    }> = [];
+    let partialReport: Awaited<
+      ReturnType<NonNullable<typeof app.reports>["create"]>
+    >;
     try {
       partialReport = await app.reports!.create(
         idA,
@@ -331,7 +385,14 @@ describe("PostgreSQL-backed accounts, reports and assets", () => {
         result,
         randomUUID(),
         undefined,
-        [{ name: "retry.tsv", kind: "source_tsv", mime: "text/tab-separated-values", bytes: Buffer.from("name\\tmz\\nA\\t1") }],
+        [
+          {
+            name: "retry.tsv",
+            kind: "source_tsv",
+            mime: "text/tab-separated-values",
+            bytes: Buffer.from("name\\tmz\\nA\\t1"),
+          },
+        ],
         (event) => mediaProgress.push(event),
       );
     } finally {
@@ -339,7 +400,14 @@ describe("PostgreSQL-backed accounts, reports and assets", () => {
     }
     expect(partialReport!.mediaStatus).toBe("failed");
     expect(partialReport!.saveWarning).toBeTruthy();
-    expect(mediaProgress.some((event) => event.stage === "assets" && event.outcome === "partial" && event.failed === 1)).toBe(true);
+    expect(
+      mediaProgress.some(
+        (event) =>
+          event.stage === "assets" &&
+          event.outcome === "partial" &&
+          event.failed === 1,
+      ),
+    ).toBe(true);
   });
   it("creates idempotently, isolates list/read/update/delete/export/assets and saves revisions", async () => {
     const key = randomUUID();

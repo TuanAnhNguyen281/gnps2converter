@@ -24,6 +24,7 @@ import {
 import { apiFetch, apiUrl, jsonApi, postProgressStream, type PipelineProgress } from "./api";
 import { useReport, type SavedResult } from "./useReport";
 import { useAccount } from "./Account";
+import './ai/ai.css';
 import {
   WorkspaceShell,
   ReportLibrary,
@@ -833,6 +834,7 @@ export default function App() {
     initialEntry === "reports" ? "reports" : "upload",
   );
   const [reportListRevision, setReportListRevision] = useState(0);
+  const pendingProject = useRef<{id:string;oldReportId:string|null}|null>(null);
   const [reportTab, setReportTab] = useState<"results" | "assets">("results");
   const ask = useConfirm();
   const [inputMode, setInputMode] = useState<"task" | "files">(
@@ -857,6 +859,13 @@ export default function App() {
   const [stage, setStage] = useState<Stage>("upload");
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const saved = useReport(stage === "results" ? result : null, reportTitle);
+  async function attachImportedReport(payload:SavedResult){
+    const pending=pendingProject.current;
+    if(!pending||!payload.reportId||payload.reportId===pending.oldReportId)return;
+    pendingProject.current=null;
+    try{await jsonApi(`/api/projects/${pending.id}/reports`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reportId:payload.reportId})});setReportListRevision(x=>x+1);}
+    catch(e){setError(`Báo cáo đã lưu nhưng chưa gắn project: ${(e as Error).message}. Mở Project & AI chat để thêm báo cáo.`);}
+  }
   const saveBadgeState = saved.conflict || saved.status === "conflict"
     ? "conflict"
     : saved.saving
@@ -1111,6 +1120,7 @@ export default function App() {
         throw new Error(payload.message ?? "Phân tích thất bại.");
       }
       saved.adopt(payload, reportTitle, [tsv, xlsx]);
+      await attachImportedReport(payload as SavedResult);
       setPinScopeKey((payload as SavedResult).reportId
         ? `report:${(payload as SavedResult).reportId}`
         : payload.task
@@ -1164,6 +1174,7 @@ export default function App() {
         body: JSON.stringify({ url: taskUrl.trim() }),
       }, setLoadingProgress);
       saved.adopt(payload, payload.title || "GNPS2 Report");
+      await attachImportedReport(payload as SavedResult);
       setPinScopeKey((payload as SavedResult).reportId
         ? `report:${(payload as SavedResult).reportId}`
         : payload.task
@@ -1364,10 +1375,16 @@ export default function App() {
     dragSelectionActiveRef.current = true;
     setGridSelection({ anchor, focus: point });
   };
-  const handleGridEditorPointerDown = (row: number, column: number, event: ReactPointerEvent<HTMLInputElement>) => {
+  const handleGridEditorPointerDown = (row: number, column: number, event: ReactPointerEvent<HTMLInputElement>, selectCell = false) => {
     event.stopPropagation();
     if (event.ctrlKey || event.metaKey || event.shiftKey) {
       selectGridCell(row, column, event);
+    } else if (selectCell) {
+      const point = { row, column };
+      dragAnchorRef.current = point;
+      dragSelectionActiveRef.current = true;
+      setCopyMessage("");
+      setGridSelection({ anchor: point, focus: point });
     }
   };
   const extendGridDrag = (row: number, column: number, event: ReactPointerEvent<HTMLTableCellElement>) => {
@@ -1476,7 +1493,12 @@ export default function App() {
       target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)
     );
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c") {
-      if (isEditor || !gridSelection) return;
+      const compoundEditor = target instanceof HTMLInputElement && target.classList.contains("compound-name-input");
+      const multipleGridCells = !!gridSelection && (gridSelection.cells
+        ? gridSelection.cells.length > 1
+        : gridSelection.anchor.row !== gridSelection.focus.row || gridSelection.anchor.column !== gridSelection.focus.column);
+      const hasSelectedText = compoundEditor && target.selectionStart !== target.selectionEnd;
+      if (!gridSelection || (isEditor && !compoundEditor) || (hasSelectedText && !multipleGridCells)) return;
       event.preventDefault();
       void copyGridSelection();
       return;
@@ -1577,6 +1599,7 @@ export default function App() {
       className={`${gridColumnClass(key)} sortable-column grid-column-header`}
       style={gridColumnStyle(key)}
       onClick={() => selectGridColumn(index)}
+      title={key === "compoundName" ? "Bấm để chọn toàn bộ cột Compound name rồi sao chép" : undefined}
     >
       {sortableHeader(key, label, subtitle, kind)}
       {pinnedColumnIndicator(key)}
@@ -1659,7 +1682,10 @@ export default function App() {
     );
     if (key === "compoundName") return (
       <td className={`wrapping-cell compound-cell grid-cell ${pinnedClassName} ${selectionClassName}`} style={style} title={row.compoundName} {...pointerProps}>
-        <input className="grid-edit-input compound-name-input" value={row.compoundName} aria-label={`Tên hoạt chất dòng ${rowIndex + 1}`} onPointerDown={(event) => handleGridEditorPointerDown(rowIndex, columnIndex, event)} onChange={(event) => {
+        <input className="grid-edit-input compound-name-input" value={row.compoundName} aria-label={`Tên hoạt chất dòng ${rowIndex + 1}`} onFocus={() => {
+          const point = { row: rowIndex, column: columnIndex };
+          setGridSelection({ anchor: point, focus: point });
+        }} onPointerDown={(event) => handleGridEditorPointerDown(rowIndex, columnIndex, event, true)} onChange={(event) => {
           update(row.id, { compoundName: event.target.value });
           setDetailRow((current) => current?.id === row.id ? { ...current, compoundName: event.target.value } : current);
         }} />
@@ -1718,6 +1744,7 @@ export default function App() {
     );
   };
   async function openReport(payload: SavedResult, discard = false) {
+    pendingProject.current=null;
     if (!discard && saved.dirty()) await saved.saveNow();
     setGridSelection(null);
     setAllEditMode(false);
@@ -1846,9 +1873,11 @@ export default function App() {
   }
 
   async function navigate(next: WorkspacePage) {
+    pendingProject.current=null;
     if (loading || sourceLoading || exporting || structureLoading)
       throw new Error("Hãy đợi thao tác hiện tại hoàn tất.");
     if (saved.dirty()) await saved.saveNow();
+
     if (next === "dashboard") {
       goHome();
       return;
@@ -1911,6 +1940,13 @@ export default function App() {
         />
       )}
       {page === "account" && <AccountPage />}
+      {(page === 'research' || page === 'ai-settings') && (
+        <section className="research-page" aria-labelledby="ai-coming-soon-title">
+          <h1 id="ai-coming-soon-title">AI chat</h1>
+          <p>Coming soon</p>
+          <p>Trợ lý nghiên cứu theo project và phiên làm việc sẽ được mở trong thời gian tới.</p>
+        </section>
+      )}
       <AnimatePresence mode="wait">
         {page === "upload" ? (
           <motion.section

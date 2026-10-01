@@ -3436,6 +3436,13 @@ body {
 .workspace-shell .result-table .grid-row-pinned-cell.grid-column-pinned { z-index:12; }
 .workspace-shell .result-table .grid-pinned-rows .sticky-select { z-index:12; }
 .workspace-shell .result-table thead .sticky-select { z-index:20; }
+.workspace-shell .result-table tbody td.grid-column-pinned.grid-cell-selected {
+  background:var(--ui-accent-soft) !important;
+  box-shadow:inset 0 0 0 2px var(--ui-accent);
+}
+.workspace-shell .result-table tbody td.grid-column-pinned.grid-cell-selected .compound-name-input {
+  background:transparent;
+}
 .workspace-shell .result-table .grid-pin-indicator {
   display:inline-flex;
   width:12px;

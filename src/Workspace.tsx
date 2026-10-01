@@ -4,7 +4,7 @@ import { apiFetch, apiUrl, jsonApi, jsonBody, setCsrf } from "./api";
 import { Brand, EmptyState, Icon, ThemeButton, useConfirm } from "./Ui";
 import type { SavedResult } from "./useReport";
 export type WorkspacePage =
-  "dashboard" | "reports" | "upload" | "results" | "account";
+  "dashboard" | "reports" | "upload" | "results" | "account" | "research" | "ai-settings";
 interface ReportItem {
   id: string;
   title: string;
@@ -76,6 +76,8 @@ export function WorkspaceShell({
     upload: "Tạo báo cáo mới",
     results: "Chi tiết báo cáo",
     account: "Tài khoản",
+    research: "AI chat · Coming soon",
+    "ai-settings": "Cài đặt AI",
   };
   async function go(next: WorkspacePage) {
     if (navigating || locked || leaving) return;
@@ -208,6 +210,7 @@ export function WorkspaceShell({
             { id: "dashboard", icon: "grid", label: "Dashboard" },
             { id: "reports", icon: "reports", label: "Báo cáo của tôi" },
             { id: "upload", icon: "plus", label: "Tạo báo cáo" },
+            { id: "research", icon: "grid", label: "AI chat · Coming soon" },
             { id: "account", icon: "user", label: "Tài khoản" },
           ] as const
         ).map((item) => (

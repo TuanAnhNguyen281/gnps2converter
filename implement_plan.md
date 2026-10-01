@@ -1,5 +1,170 @@
 # Implementation Plan — GNPS2 Converter
 
+## Nâng cấp AI chatbot theo project và phiên nghiên cứu
+
+**Ngày lập: 01/10/2026. Trạng thái: Đã triển khai MVP theo yêu cầu “triển khai” của người dùng.**
+
+### Kết quả và xác minh ngày 01/10/2026
+
+- Hoàn tất project, phiên nghiên cứu, gắn báo cáo, chat lưu PostgreSQL, lấy dữ liệu theo phạm vi và revision, nguồn bấm mở dòng, công cụ chỉ đọc, streaming/polling, dừng/thử lại, lịch sử và xuất Markdown/JSON.
+- Hoàn tất provider/model, API key mã hóa, model mặc định theo tài khoản/project/phiên, catalog và nhập thủ công, usage, hạn mức và đơn giá tùy chọn với phiên bản được chụp tại mỗi lượt.
+- Đã áp dụng migration 0002/0003 vào DB cấu hình; đã tạo khóa mã hóa local trong .env, không đưa secret vào mã nguồn hoặc tài liệu.
+- Production build đạt; 63 kiểm thử trong 10 file đạt. Trình duyệt kiểm tra thao tác desktop/mobile sáng/tối đạt, không có page error; bằng chứng tại qa/research-ai/browser-results.json và ảnh cùng thư mục. Provider kiểm thử là giả lập trong DB bộ nhớ riêng.
+- Project dùng lưu trữ (archive) thay cho xóa vĩnh viễn: automatic approval review từ chối thao tác xóa project kèm báo cáo/cloud do chưa được cho phép rõ. Xóa hội thoại có xác nhận, không xóa báo cáo và không đặt lại hạn mức ngày.
+- Lịch sử dài dùng trích đoạn tóm tắt có giới hạn và version; giữ nguyên bản gốc. Các request chạy trong process có lease; restart làm lượt hết lease thành interrupted khi truy cập AI tiếp, không tự resume.
+- Chưa xác minh API nhà cung cấp thật hoặc production. Bước sử dụng: khởi động lại ứng dụng, vào Cài đặt AI nhập provider/API key, tải hoặc thêm model, chat thử rồi chọn mặc định. Kiểm tra proxy SSE/cookie và giới hạn khi deploy.
+
+### 1. Mục tiêu và quyết định thiết kế
+
+Xây dựng trợ lý nghiên cứu ngay trong GNPS2 Converter: tự lấy dữ liệu đã lưu của project/phiên đang mở, trả lời về báo cáo và hợp chất, lưu toàn bộ hội thoại trong PostgreSQL, cho người dùng nhập API key và quản lý provider/model. Dùng `E:\nghich\learnwme` làm nguồn tham khảo cơ chế AI; dữ liệu và API key của hai ứng dụng độc lập.
+
+- Giữ React/Vite + Express/TypeScript + PostgreSQL hiện tại; không bổ sung một DB hay dịch vụ vector cho bản đầu.
+- Cấu trúc nghiệp vụ: **Tài khoản → Project → Phiên nghiên cứu → Hội thoại → Tin nhắn**. Project có nhiều báo cáo, một phiên có thể làm việc với nhiều báo cáo thuộc project đó.
+- Phiên nghiên cứu là đối tượng lưu lâu dài, khác cookie phiên đăng nhập. Đóng trình duyệt, đăng nhập lại hoặc đổi model vẫn tiếp tục được phiên nghiên cứu.
+- AI bản đầu đọc, phân tích, so sánh và gợi ý; việc sửa kết quả nghiên cứu vẫn do người dùng thực hiện. Không cấp quyền chạy SQL, shell hay tự sửa báo cáo cho model.
+- Mỗi lượt chat ghi rõ model thực tế, nguồn dữ liệu và revision được sử dụng. Không xem lời giải thích AI là xác nhận định danh hợp chất.
+
+### 2. Cơ sở từ mã nguồn đã kiểm tra
+
+| Hệ thống | Hiện trạng đã đọc | Hướng áp dụng |
+|---|---|---|
+| GNPS2 `server/db/schema.ts`, `migrations/0001_accounts_reports.sql` | Có users, reports, report_rows, media_assets, report_assets; báo cáo có owner và revision | Mở rộng migration, giữ quyền sở hữu và cơ chế lưu hiện có |
+| GNPS2 `server/app.ts`, `server/auth/*`, `server/reports/service.ts` | Session tài khoản, CSRF, kiểm tra owner, CRUD báo cáo và tệp | Dùng chung xác thực cho project/chat/provider |
+| GNPS2 `src/Workspace.tsx`, `src/App.tsx`, `src/useReport.ts` | Workspace báo cáo, autosave, revision/conflict, chọn vùng bảng | Gắn chatbot với project/phiên/báo cáo; chờ lưu trước khi lấy context |
+| Learnwme `backend/src/modules/api.ts` | CRUD provider, cấu hình model theo tác vụ, lịch sử hội thoại, gọi `/chat/completions`, usage | Tách thành module AI riêng; thích nghi cho nhiều tài khoản GNPS |
+| Learnwme `backend/src/modules/providers/discovery.ts` | Tải `/models`, chuẩn hóa catalog, metadata/capabilities | Dùng ý tưởng catalog; có nhập model thủ công và kiểm tra bằng chat thật |
+| Learnwme `backend/src/secrets.ts` | AES-256-GCM, IV ngẫu nhiên, authentication tag | Mã hóa key phía server, bổ sung key version/rotation |
+| Learnwme `frontend/features/settings/SettingsScreen.tsx` | Nhập API, khám phá model, tìm model và bật nhiều model sử dụng | Thiết kế trang Cài đặt AI phù hợp giao diện GNPS |
+
+Các điểm cần nâng cấp so với luồng chat tham khảo: request hiện dùng `stream:false`, lịch sử tối đa 30 message; user/assistant được lưu sau khi provider trả lời thành công. GNPS cần lưu user/request trước khi gọi provider, trạng thái lỗi/dừng, phân trang, thứ tự xác định, context theo revision và chống gửi trùng. Cần dùng user từ session GNPS, không mang cơ chế owner cấu hình cố định của ứng dụng tham khảo sang.
+
+Khảo sát ban đầu dựa trên mã nguồn. Sau triển khai đã kết nối DB GNPS và áp dụng migration 0002/0003; chưa có credential provider để xác minh AI thật, chưa triển khai production.
+
+### 3. Luồng sử dụng đề xuất
+
+1. Vào **Cài đặt AI**: nhập tên provider, kiểu API, Base URL, API key → tải model → bật model → chọn mặc định → kiểm tra trả lời thử. Thông báo trước rằng phép thử chat có thể tính phí.
+2. Tạo project với tên, mô tả và mục tiêu nghiên cứu; thêm báo cáo có sẵn hoặc nhập GNPS/TSV/XLSX mới vào project.
+3. Mở project, tạo hoặc tiếp tục phiên; chọn báo cáo đang phân tích. Phiên lưu báo cáo đang mở, bộ lọc, sort và các row ID đang chọn. Trạng thái ghim/độ rộng cột hiện có tiếp tục dùng cơ chế cũ.
+4. Mở bảng chat bên phải: nhìn thấy tên project, phiên, model và phạm vi dữ liệu. Trên mobile chuyển sang panel toàn màn hình có nút quay lại.
+5. Mặc định context gồm mục tiêu project, thông tin phiên, tổng hợp báo cáo đang mở và các dòng được chọn. Người dùng có thể chuyển sang toàn báo cáo hoặc các báo cáo khác trong project.
+6. Hỏi ví dụ: “Tóm tắt các hợp chất nổi bật”, “Các dòng đang chọn có ppm bất thường không?”, “So sánh kết quả hai báo cáo”. AI lấy dữ liệu qua công cụ đọc, trả lời kèm nguồn bấm được để mở báo cáo/dòng liên quan.
+7. Có tạo hội thoại mới, đặt tên, tìm lịch sử, dừng trả lời, thử lại lượt lỗi, đổi model cho lượt tiếp theo và xuất lịch sử Markdown/JSON. Không cho sửa tin nhắn cũ trong MVP để tránh lịch sử bị phân nhánh ngầm.
+
+### 4. Cơ chế tự lấy dữ liệu và quản lý context
+
+Luồng: **Gửi câu hỏi → xác thực owner/project/phiên → đồng bộ báo cáo → tạo snapshot context → lấy dữ liệu cần thiết → gọi model → lưu kết quả/usage → hiện câu trả lời và nguồn**.
+
+- Browser chỉ gửi ID và lựa chọn phạm vi; server kiểm tra quan hệ và lấy dữ liệu chuẩn từ DB. Không tin owner, row payload hoặc kết quả tổng hợp từ client.
+- Khi báo cáo có thay đổi chưa lưu, đợi autosave thành công; gặp conflict/lỗi thì yêu cầu xử lý hoặc cho chọn dùng revision đã lưu, có nhãn rõ ràng. Không âm thầm gửi số liệu cũ.
+- Một lượt sử dụng snapshot nhất quán của các báo cáo liên quan. Vì revision hiện tại không đảm bảo khôi phục được nội dung cũ, lưu payload đã dùng hoặc kết quả truy vấn trong snapshot DB, cùng hash, revision, row ID và thời điểm; không chỉ lưu revision tham chiếu.
+- Mặc định gửi tổng hợp và tập dòng liên quan, không đẩy toàn bộ hàng nghìn dòng vào prompt. Lọc/tính thống kê phía server trên đầy đủ dữ liệu; phân trang và giới hạn đầu ra, ghi rõ số dòng đã xét, đã trả và bị cắt.
+- Công cụ đọc dự kiến: `get_project_overview`, `list_project_reports`, `get_report_summary`, `query_report_rows`, `get_compound_details`, `compare_reports`. Schema đầu vào dùng allowlist trường/toán tử, validator; SQL tham số hóa do ứng dụng tạo. Server tự gắn owner/project, model không được mở rộng phạm vi.
+- So sánh cần quy tắc rõ: mặc định ưu tiên mã thư viện/định danh hợp chất có sẵn; nếu chỉ khớp tên thì ghi “khớp theo tên”, không khẳng định cùng chất. Chuẩn hóa đơn vị và thông báo thiếu dữ liệu.
+- Model có tool calling được dùng vòng lặp tối đa 4 lần/lượt; model không hỗ trợ vẫn dùng context tổng hợp và truy vấn xác định của ứng dụng, nêu giới hạn thay vì giả vờ đã gọi công cụ.
+- Ngân sách context cấu hình theo model; ưu tiên câu hỏi, dữ liệu hiện tại, lượt gần nhất, sau đó tóm tắt lịch sử. Tóm tắt lưu version và message range, không xóa bản gốc; thay đổi dữ liệu làm mất hiệu lực cache/tóm tắt dữ liệu liên quan.
+- Thông tin trong tệp, metadata và tin nhắn được xem là dữ liệu không đáng tin, không được đổi system instruction hoặc quyền công cụ. Không tải tùy ý URL do model tạo.
+- Nguồn dẫn do server dựng từ dữ liệu đã truy xuất: report ID, revision, row ID, trường/giá trị, snapshot ID. Kiểm tra nguồn trước khi render; tách nhận xét suy luận khỏi dữ liệu thực.
+- Bản đầu đọc kết quả phân tích có cấu trúc trong DB và metadata tệp; không hứa đọc nội dung PDF/Word, ảnh phổ hoặc cấu trúc hóa học bằng vision. OCR, tài liệu dài và RAG thuộc giai đoạn sau.
+
+### 5. Provider, API và quản lý model
+
+- MVP hỗ trợ adapter **OpenAI-compatible Chat Completions** cho endpoint thực sự tương thích. Thiết kế interface `discoverModels`, `testChat`, `generate`, `stream`, `normalizeUsage`, `capabilities` để thêm OpenAI Responses và Anthropic native ở giai đoạn sau.
+- Không giả định mọi provider đều có `/models`, tool calling, streaming hoặc cùng tham số. Catalog có nhập thủ công, model bật/tắt, context limit, max output, khả năng tools/streaming và trạng thái xác minh; giá trị chưa xác minh được ghi rõ.
+- Tách “kết nối/tải model thành công” khỏi “chat thử thành công”. Tải catalog không chứng minh key có quyền sử dụng từng model.
+- Thứ tự model: lựa chọn lượt hiện tại → cấu hình phiên → cấu hình project → mặc định tài khoản. Chỉ cho dùng provider/model thuộc tài khoản và đang bật; lưu lựa chọn thực tế từng lượt.
+- Không tự chuyển provider khi lỗi. Lựa chọn thử lại/đổi model hiển thị rõ vì thay đổi provider có thể gửi dữ liệu sang một bên khác.
+- API key chỉ gửi khi tạo/thay key, mã hóa AES-256-GCM tại server; UI chỉ nhận `apiKeyConfigured` và phần che. Khóa mã hóa riêng tối thiểu 32 byte, khác session secret, kèm key version và quy trình đổi khóa. Không log key, không lưu trong localStorage hoặc prompt.
+- Base URL HTTPS ở production; chặn localhost/private/link-local/metadata endpoint, URL có credential, redirect không được kiểm tra và DNS rebinding; giới hạn egress/provider allowlist khi triển khai. Provider local chỉ là tính năng riêng khi có cấu hình môi trường cho phép.
+- Theo dõi token nếu provider trả usage; thiếu usage ghi “không xác định”. Chi phí chỉ là ước tính theo đơn giá người dùng cấu hình và version, không mặc định bằng 0. Giới hạn số lượt đồng thời, lượt/ngày và output; dự toán token trước request, quyết toán sau. Token thật do provider quyết định nên giới hạn dự toán không đảm bảo hóa đơn tuyệt đối.
+- Trang cấu hình cho biết dữ liệu nào sẽ gửi ra provider; chat chỉ bắt đầu sau thao tác người dùng. Không tự gửi dữ liệu project khi vừa mở trang.
+
+### 6. Thiết kế DB dự kiến
+
+Giữ PostgreSQL hiện tại. Tên bảng dưới đây là thiết kế đề xuất, khóa UUID, timestamp có timezone, text dài có giới hạn ứng dụng.
+
+| Bảng | Nội dung và ràng buộc chính |
+|---|---|
+| `projects` | owner_id, name, description, research_goal, archived_at; unique(id, owner_id) |
+| `reports.project_id` | Nullable cho báo cáo cũ; FK có owner để báo cáo không gắn project tài khoản khác; một báo cáo thuộc tối đa một project |
+| `research_sessions` | owner_id, project_id, title, status, active_report_id, view_state JSONB, model override, last_active_at |
+| `ai_providers` | owner_id, name, adapter_type, base_url, encrypted_secret, iv, tag, key_version, enabled |
+| `ai_provider_models` | provider_id, model_id, display_name, capabilities, limits, enabled, discovered_at; unique(provider_id, model_id) |
+| `ai_settings` | default tài khoản/project/phiên, provider/model, giới hạn; kiểm tra scope và ownership |
+| `ai_conversations` | owner_id, project_id, research_session_id, title, summary, summary_version, summary_until_seq, archived_at |
+| `ai_messages` | conversation_id, sequence, role, content/parts JSONB, status, parent/request ID, provider/model snapshot, created_at; unique(conversation_id, sequence) |
+| `ai_requests` | owner/conversation, client_request_id, state, model/provider, context_snapshot_id, error_code, started/ended; unique(owner_id, client_request_id) |
+| `ai_context_snapshots` | project/session, report revisions, selection/filter, actual normalized payload/tool outputs, hash, prompt_version, budget/truncation metadata |
+| `ai_tool_runs` | request_id, tool_name, validated arguments, snapshot/result reference, duration/status; không lưu key |
+| `ai_usage` | request_id, input/output/cache tokens nullable, usage source, estimate/pricing version; unique(request_id) cho quyết toán cuối |
+
+Tất cả đường truy xuất kiểm tra owner qua quan hệ cha; bổ sung FK composite khi phù hợp và index theo owner/project/updated_at, conversation/sequence. Giao dịch ngắn, không giữ transaction khi chờ provider. Hạn mức lưu chat/context riêng với quota media; giới hạn snapshot bytes, phân trang lịch sử.
+
+Project được archive trước; báo cáo cũ nằm trong “Báo cáo chưa thuộc project”, người dùng tự gắn, không tự gom tùy ý. MVP không chuyển báo cáo đã được dùng trong chat sang project khác; có thể tạo bản sao nếu cần. Xóa project có màn hình nêu rõ dữ liệu sẽ xóa; xóa các phiên/chat/snapshot/usage liên quan và gọi đúng quy trình xóa báo cáo/media hiện có, giữ cơ chế retry xóa cloud. Không chỉ dựa vào cascade DB để xóa tệp cloud.
+
+### 7. API và độ tin cậy của chat
+
+- `/api/projects`: CRUD/archive và danh sách báo cáo; gắn báo cáo vào project qua endpoint có kiểm tra owner.
+- `/api/projects/:projectId/research-sessions`: tạo/liệt kê phiên; endpoint phiên để tiếp tục, cập nhật trạng thái và context selection.
+- `/api/ai/providers`: CRUD; `/:id/models`, `/:id/discover-models`, `/:id/test`; `/api/ai/settings` cho các scope.
+- `/api/research-sessions/:id/conversations`: tạo/liệt kê; `/api/ai/conversations/:id/messages` phân trang theo sequence; rename/archive/delete/export.
+- `POST /api/ai/conversations/:id/messages`: kèm client request ID, message, scope, optional model override; trả request ID sau khi đã lưu DB.
+- `GET /api/ai/requests/:id/events`: SSE có xác thực; sự kiện `context`, `tool`, `delta`, `usage`, `done`, `error`. `POST /api/ai/requests/:id/cancel` để dừng. SSE dùng cookie cùng origin, CORS cụ thể nếu khác origin; không bỏ CSRF cho POST.
+- Lưu user message và request trước khi gọi API. Một lượt chạy đồng thời cho mỗi conversation bằng khóa DB/unique constraint; chống double click và retry trùng. Retry lượt lỗi tạo attempt mới có liên kết, không chèn thêm user message vô tình.
+- Chuỗi trạng thái: queued → running → completed/failed/cancelled/interrupted. Lưu output từng đợt, không ghi mỗi token; chỉ `completed` được xem là câu trả lời hoàn chỉnh. Lỗi provider vẫn giữ câu hỏi và lỗi đã làm sạch.
+- SSE mất kết nối không tự gọi lại model. Kết nối lại đọc trạng thái và nội dung đã lưu; timeout/cancel abort upstream khi hỗ trợ, usage có thể chưa đầy đủ. Provider có thể tính phí dù request lỗi.
+- MVP chạy request trong một backend process, với concurrency limit và lease/heartbeat DB. Restart đánh dấu request hết lease thành interrupted, cho retry thủ công. Không tuyên bố tác vụ tồn tại qua restart; worker/queue bền vững là giai đoạn sau.
+- Production cần kiểm tra proxy không buffer SSE, heartbeat, timeout trên Vercel/Render và cookie/CORS. Nếu nền tảng không đáp ứng, dùng polling trạng thái làm phương án thay thế và giữ nguyên lưu DB.
+
+### 8. Giao diện và tệp dự kiến thay đổi
+
+- `src/Workspace.tsx`, `src/Dashboard.tsx`: điều hướng project, phiên nghiên cứu, Cài đặt AI và danh sách lịch sử.
+- `src/App.tsx`, `src/useReport.ts`: project cho import/lưu báo cáo, đồng bộ context với autosave và bảng chọn dòng; tách phần AI ra component để tránh tăng thêm độ phức tạp App.
+- Mới `src/ai/*`: ChatPanel, ConversationList, AiSettings, ModelPicker, ContextSources, hook stream; `src/projects/*`: ProjectList/ProjectDetail/ResearchSessionPicker.
+- `src/api.ts`, `src/types.ts`, stylesheet hiện tại: API/kiểu dữ liệu mới, panel desktop/mobile, theme sáng/tối, Markdown render an toàn không chạy HTML tùy ý.
+- Mới `server/ai/*`: routes, providers/adapters, secrets, context, tools, orchestration, persistence, usage; `server/projects/*`, `server/research-sessions/*`.
+- `server/app.ts`, `server/config.ts`, `server/db/schema.ts`, migration SQL mới, report service/validation và import routes: đăng ký route, biến môi trường, scope project. Không sửa migration đã áp dụng.
+- `.env.example` và tài liệu triển khai: encryption key, allowlist, timeout, token/output/concurrency/storage limits; không đưa secret thật vào tài liệu.
+
+### 9. Phân kỳ triển khai
+
+| Giai đoạn | Đầu ra | Điều kiện hoàn thành |
+|---|---|---|
+| 1. Nền tảng project/phiên | Migration, CRUD, gắn báo cáo, workspace | Dữ liệu cũ dùng được; không truy cập chéo tài khoản/project |
+| 2. API/model | Mã hóa key, catalog, model thủ công, chat test, settings | Key không lộ; chọn model đúng scope; lỗi cấu hình rõ ràng |
+| 3. Chat lưu DB | Hội thoại/message/request, streaming/polling, cancel/retry | Refresh giữ lịch sử, lỗi vẫn lưu câu hỏi, gửi trùng không sinh lượt mới |
+| 4. Context nghiên cứu | Snapshot, tools đọc, aggregate/compare, dẫn nguồn | Lấy đúng báo cáo/revision, dữ liệu lớn không bị ngầm cắt |
+| 5. Hoàn thiện và nghiệm thu | Mobile/theme, quota/usage, export/delete, tài liệu | Test tích hợp, tương tác thật và smoke production đạt |
+
+MVP gồm cả 5 giai đoạn. Mỗi giai đoạn có thể review riêng nhưng bản chat chỉ được coi là đạt mục tiêu sau khi có context project/phiên và kiểm tra ở giai đoạn 4–5. Sau MVP: native Responses/Anthropic adapters, đọc tài liệu/OCR/vision, RAG khi có nhu cầu thực, background worker và đề xuất chỉnh báo cáo có diff để người dùng duyệt.
+
+### 10. Kiểm thử và nghiệm thu bắt buộc
+
+1. Hai tài khoản không đọc/sửa provider, model, project, phiên, message, SSE, snapshot hoặc tệp của nhau; thử ID sai scope và CSRF.
+2. Báo cáo cũ, import GNPS/TSV/XLSX, autosave/conflict, chọn/ghim vùng bảng và xuất Excel/Word giữ hành vi hiện có.
+3. Mở lại phiên sau refresh/login lấy đúng project/báo cáo/lịch sử; đổi project không mang selection/chat/context sang project khác.
+4. Dữ liệu fixture biết trước: đếm/lọc/ppm/so sánh phải đúng khi có hàng nghìn dòng; câu trả lời dẫn nguồn đúng row/revision; báo cáo thay đổi giữa lượt không làm snapshot bị trộn.
+5. Model discovery lỗi/không hỗ trợ, model thủ công, model tắt, key sai, quota, 429/5xx, timeout, provider thiếu usage/tool/stream đều có hành vi rõ ràng.
+6. Double click, nhiều tab, cancel, SSE disconnect/reconnect và backend restart không mất user message, không tạo request trùng; output chưa xong được ghi trạng thái đúng.
+7. Kiểm tra secret không xuất hiện trong response/log/export/prompt; SSRF với private IP/redirect/DNS; prompt injection không mở quyền công cụ; Markdown không chạy script.
+8. Chạy typecheck/build, test context/tool/scope/request-state và integration bằng provider giả lập; không cần dùng API trả phí cho CI. Kiểm tra trình duyệt bằng thao tác thật trên desktop/mobile và hai theme.
+9. Khi có môi trường/key phù hợp: chat provider thật, cookie/CSRF, lưu DB sau reload, stream/cancel và dữ liệu revision trên deployment. Build/test nội bộ không thay cho nghiệm thu này.
+
+### 11. Quyết định mặc định để review
+
+- Project cá nhân theo owner, chưa có chia sẻ/team/role mới.
+- Một project nhiều báo cáo; nhiều phiên và nhiều hội thoại; mỗi lượt chat chỉ đọc trong một project.
+- PostgreSQL hiện tại lưu chat và snapshot; key riêng cho mỗi tài khoản; một model mỗi lượt, không gọi đồng thời nhiều model.
+- Chat ở panel trong màn báo cáo và trang hội thoại đầy đủ; nguồn là dữ liệu đã lưu; model/API do người dùng cung cấp.
+- Người dùng đã review và yêu cầu **“triển khai”**; việc sửa hệ thống đã được thực hiện, theo chỉ dẫn AGENTS.md: “Đối với những yêu cầu phải xử lý với khối lượng công việc, nghiệp vụ nhiều cần tạo implement_plan.md để review trước khi thực hiện”.
+
+### 12. Tài liệu kỹ thuật tham khảo
+
+- OpenAI Function calling: https://developers.openai.com/api/docs/guides/function-calling — luồng công cụ, schema và kiểm tra đầu vào.
+- OpenAI Streaming: https://developers.openai.com/api/docs/guides/streaming-responses — sự kiện streaming; adapter chuẩn hóa về sự kiện nội bộ.
+- Claude Streaming: https://platform.claude.com/docs/en/build-with-claude/streaming — cơ chế streaming riêng cho adapter native ở giai đoạn sau.
+
+Không cố định tên model hay giá từ tài liệu; catalog thực tế và cấu hình tài khoản là nguồn khi triển khai.
+
 ## Ghim hàng và cột trong bảng kết quả
 
 **Trạng thái: Đã triển khai theo kế hoạch được người dùng duyệt bằng yêu cầu “triển khai”.**

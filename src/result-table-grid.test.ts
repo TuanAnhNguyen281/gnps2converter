@@ -140,4 +140,22 @@ describe("result table grid selection and clipboard format", () => {
       ["stt", "compoundName", "adduct"],
     )).toEqual({ text: "1\tCaffeine\t[M+H]+", rowCount: 1, columnCount: 3 });
   });
+
+  it("copies the entire compound-name column in visible row order", () => {
+    const rows = orderPinnedRows([
+      row({ id: "row-1", compoundName: "Malic acid" }),
+      row({ id: "row-2", compoundName: "Azelaic acid" }),
+    ], ["row-2"]);
+    const columns = orderPinnedColumns(
+      ["stt", "rtDisplay", "compoundName", "adduct"],
+      [],
+      ["stt", "compoundName"],
+    );
+    expect(selectionToTsv(
+      rows,
+      makeGridColumnSelection(rows.length, columns.indexOf("compoundName")),
+      [],
+      columns,
+    )).toEqual({ text: "Azelaic acid\r\nMalic acid", rowCount: 2, columnCount: 1 });
+  });
 });

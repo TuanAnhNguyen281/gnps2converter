@@ -1,0 +1,16 @@
+{
+  "passed": true,
+  "checks": [
+    "login",
+    "configure provider/model",
+    "create project/session",
+    "attach report",
+    "stream chat",
+    "sources/usage",
+    "reload history/session",
+    "report chat drawer",
+    "mobile no overflow",
+    "light/dark"
+  ],
+  "pageErrors": []
+}

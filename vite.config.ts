@@ -5,7 +5,7 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
-    proxy: { '/api': 'http://localhost:8787' },
+    proxy: { '/api': process.env.DEV_API_TARGET ?? 'http://localhost:8787' },
   },
   build: {
     chunkSizeWarningLimit: 900,

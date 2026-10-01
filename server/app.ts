@@ -44,11 +44,14 @@ import {
 import { MediaService } from "./media/service.js";
 import { ReportService } from "./reports/service.js";
 import type { PipelineProgress, ProgressReporter } from "./progress.js";
+import { researchRouter } from './ai/routes.js';
+import type { ProviderTransport } from './ai/provider.js';
 
 export function createApp(
   config: Config,
   db?: Database,
   provider?: MediaProvider,
+  aiTransport?: ProviderTransport,
 ) {
   const media = db
     ? new MediaService(db, config, provider ?? cloudinaryProvider(config))
@@ -317,6 +320,7 @@ export function createApp(
     }),
   );
   let active = 0;
+  if (db && reports) app.use('/api', researchRouter(db, config, aiTransport));
   app.use(
     [
       "/api/analyze",
@@ -369,7 +373,7 @@ export function createApp(
             )
         : null;
       const result = await db!.query(
-        "SELECT id,title,revision,row_count,media_status,updated_at FROM reports WHERE owner_id=$1 AND title ILIKE $2 AND ($3::timestamptz IS NULL OR (updated_at,id)<($3::timestamptz,$4::uuid)) ORDER BY updated_at DESC,id DESC LIMIT 21",
+        "SELECT id,title,revision,row_count,media_status,updated_at,project_id FROM reports WHERE owner_id=$1 AND title ILIKE $2 AND ($3::timestamptz IS NULL OR (updated_at,id)<($3::timestamptz,$4::uuid)) ORDER BY updated_at DESC,id DESC LIMIT 21",
         [
           user,
           `%${search.replace(/[\\%_]/g, "\\$&")}%`,
