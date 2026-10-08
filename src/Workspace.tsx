@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useAccount } from "./Account";
+import { UserAvatar } from "./UserAvatar";
 import { apiFetch, apiUrl, jsonApi, jsonBody, setCsrf } from "./api";
 import { Brand, EmptyState, Icon, ThemeButton, useConfirm } from "./Ui";
 import type { SavedResult } from "./useReport";
@@ -28,14 +29,6 @@ const dateLabel = (value: string) =>
     hour: "2-digit",
     minute: "2-digit",
   });
-const initial = (name: string) =>
-  name
-    .trim()
-    .split(/\s+/)
-    .slice(-2)
-    .map((s) => s[0])
-    .join("")
-    .toUpperCase() || "U";
 export function WorkspaceShell({
   page,
   onNavigate,
@@ -279,7 +272,9 @@ export function WorkspaceShell({
           onClick={() => void go("account")}
           disabled={locked || navigating || leaving}
         >
-          <span className="avatar">{initial(user.displayName)}</span>
+          <span className="avatar">
+            <UserAvatar userId={user.id} name={user.displayName} decorative />
+          </span>
           <span>
             <strong>{user.displayName}</strong>
             <small>{user.email}</small>
@@ -340,7 +335,12 @@ export function WorkspaceShell({
               aria-label="Mở tài khoản"
               disabled={locked || navigating || leaving}
             >
-              {initial(user.displayName)}
+              <UserAvatar
+                userId={user.id}
+                name={user.displayName}
+                size={32}
+                decorative
+              />
             </button>
           </div>
         </header>
@@ -676,7 +676,9 @@ export function AccountPage() {
         </div>
       </div>
       <div className="profile-card">
-        <span className="avatar large-avatar">{initial(user.displayName)}</span>
+        <span className="avatar large-avatar">
+          <UserAvatar userId={user.id} name={user.displayName} size={60} />
+        </span>
         <div>
           <h2>{user.displayName}</h2>
           <p>{user.email}</p>

@@ -729,6 +729,7 @@ body {
   margin-top: 3px;
 }
 .avatar {
+  padding: 0;
   width: 34px;
   height: 34px;
   display: grid;
@@ -740,6 +741,14 @@ body {
   font-weight: 700;
   flex-shrink: 0;
   border: 1px solid color-mix(in srgb, var(--ui-accent) 12%, transparent);
+}
+.user-avatar-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  border-radius: 50%;
+  object-fit: contain;
 }
 .logout-button {
   display: flex;
