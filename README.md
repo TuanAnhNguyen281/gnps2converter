@@ -28,6 +28,8 @@ Mở **Cài đặt AI**, nhập tên provider, Base URL HTTPS của API **OpenAI
 
 Tạo hội thoại trong phiên rồi chọn phạm vi dòng đang chọn, báo cáo đang mở hoặc các báo cáo trong project. Có nút **AI chat · Project** trên màn báo cáo để chat ngay khi phân tích. Hệ thống đợi autosave, kiểm tra revision, chụp dữ liệu đã lưu và chỉ gửi thông tin có giới hạn vào provider. Model có tools được phép đọc/lọc/tổng hợp/so sánh snapshot; model không có tools chỉ dùng dữ liệu khởi tạo và phải nêu giới hạn. AI không tự sửa báo cáo hoặc xác nhận định danh hợp chất.
 
+Prompt dùng mã tham chiếu ngắn thay cho UUID: `R1` là báo cáo thứ nhất trong snapshot, `R1-12` là dòng thứ 12 của báo cáo đó. Mỗi dòng gửi đi chỉ gồm trường có giá trị, fragments rút gọn (đầy đủ qua `get_compound_details`) và metadata thư viện trong danh sách cho phép (SpectrumID, MQScore, SharedPeaks, SMILES, InChIKey, phân lớp…); snapshot lưu DB vẫn giữ nguyên dòng gốc. Câu trả lời hiển thị Markdown (không render HTML) và trích dẫn `[R1-12]` thành chip mở đúng dòng. Server kiểm tra từng mã: không tồn tại trong snapshot hoặc trỏ tới dòng AI chưa được xem sẽ bị đánh dấu ⚠. Mã của câu trả lời cũ được ánh xạ lại theo snapshot mới khi đưa vào lịch sử. Provider bật Stream được stream cả các vòng có tools, kèm `stream_options.include_usage` để nhận usage.
+
 - Project, phiên, hội thoại, tin nhắn, nguồn/revision, request state và usage được lưu PostgreSQL. Phiên nghiên cứu độc lập với cookie đăng nhập.
 - Đổi model chỉ ảnh hưởng lượt tiếp theo. Thứ tự ưu tiên: lượt chat → phiên → project → tài khoản. Giao diện hiển thị provider/model hiệu lực; không tự chuyển provider khi lỗi.
 - Câu hỏi được lưu trước khi gọi provider; lỗi/dừng/gián đoạn vẫn giữ lịch sử. Gửi trùng dùng request ID và fingerprint; không tự gọi lại model khi SSE mất kết nối.
@@ -37,7 +39,7 @@ Tạo hội thoại trong phiên rồi chọn phạm vi dòng đang chọn, báo
 
 ### Cấu hình máy chủ AI
 
-Chạy `npm run db:migrate` để áp dụng `0002_research_ai.sql` và `0003_ai_model_pricing.sql` (chỉ thêm bảng/cột/ràng buộc; không chuyển hoặc xóa báo cáo cũ). Khai báo các biến trong `.env.example`:
+Chạy `npm run db:migrate` để áp dụng `0002_research_ai.sql`, `0003_ai_model_pricing.sql` và `0004_ai_citations.sql` (chỉ thêm bảng/cột/ràng buộc; không chuyển hoặc xóa báo cáo cũ). Khai báo các biến trong `.env.example`:
 
 ```text
 AI_ENCRYPTION_KEY=<64 ký tự hex ngẫu nhiên, tương đương 32 byte>

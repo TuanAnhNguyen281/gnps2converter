@@ -30,8 +30,14 @@ let sql: PGlite,
   providerId: string,
   reportId: string,
   otherReport: string;
-let mode: "success" | "failure" | "tool" | "wait" | "stream" | "unknown" =
-    "success",
+let mode:
+    | "success"
+    | "failure"
+    | "tool"
+    | "wait"
+    | "stream"
+    | "streamTool"
+    | "unknown" = "success",
   calls = 0,
   captured: any[] = [];
 const transport: ProviderTransport = async (url, _key, body, signal) => {
@@ -59,6 +65,63 @@ const transport: ProviderTransport = async (url, _key, body, signal) => {
       'data: {"choices":[{"delta":{"content":"Trả lời "}}]}\n\ndata: {"choices":[{"delta":{"content":"stream"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":4}}\n\ndata: [DONE]\n\n',
       { headers: { "content-type": "text/event-stream" } },
     );
+  if (mode === "streamTool") {
+    const toolRound = !(body as any).messages.some(
+      (m: any) => m.role === "tool",
+    );
+    const chunks = toolRound
+      ? [
+          { choices: [{ delta: { content: "Đang tra cứu" } }] },
+          {
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: "call-s",
+                      function: {
+                        name: "query_report_rows",
+                        arguments: '{"reportId":"R1",',
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+          {
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      function: { arguments: '"minAbsolutePpm":5}' },
+                    },
+                  ],
+                },
+                finish_reason: "tool_calls",
+              },
+            ],
+          },
+          { choices: [], usage: { prompt_tokens: 7, completion_tokens: 3 } },
+        ]
+      : [
+          { choices: [{ delta: { content: "Dòng lệch ppm: [R1-1]" } }] },
+          {
+            choices: [
+              { delta: { content: ", sai [R1-9]" }, finish_reason: "stop" },
+            ],
+          },
+          { choices: [], usage: { prompt_tokens: 9, completion_tokens: 4 } },
+        ];
+    return new Response(
+      chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("") +
+        "data: [DONE]\n\n",
+      { headers: { "content-type": "text/event-stream" } },
+    );
+  }
   if (
     mode === "tool" &&
     !(body as any).messages.some((m: any) => m.role === "tool")
@@ -149,6 +212,7 @@ beforeAll(async () => {
     "0001_accounts_reports.sql",
     "0002_research_ai.sql",
     "0003_ai_model_pricing.sql",
+    "0004_ai_citations.sql",
   ])
     await sql.exec(
       await readFile(
@@ -516,6 +580,44 @@ describe("Research project, provider and persistent chat", () => {
     expect(events.headers["content-type"]).toContain("text/event-stream");
     expect(events.text).toContain("event: state");
     expect(events.text).toContain("Trả lời stream");
+    await post(`/api/ai/providers/${providerId}/models`, {
+      modelId: "test-model",
+    });
+    mode = "success";
+  });
+  it("streams tool rounds, sends refs instead of UUIDs and validates citations", async () => {
+    await post(`/api/ai/providers/${providerId}/models`, {
+      modelId: "test-model",
+      supportsTools: true,
+      supportsStream: true,
+    });
+    mode = "streamTool";
+    captured = [];
+    const r = await send();
+    const state = await finish(r.body.requestId);
+    expect(state.content).toBe("Dòng lệch ppm: [R1-1], sai [R1-9]");
+    expect(state.toolRuns).toHaveLength(1);
+    expect(state.toolRuns[0].result.rows[0].id).toBe("row-a");
+    expect(state.usage.input_tokens).toBe(16);
+    expect(state.citations).toEqual([
+      { ref: "R1-1", reportId, rowId: "row-a", status: "ok" },
+      { ref: "R1-9", reportId: null, rowId: null, status: "invalid" },
+    ]);
+    expect(captured[0].stream).toBe(true);
+    expect(captured[0].stream_options).toEqual({ include_usage: true });
+    expect(captured[0].tools.length).toBeGreaterThan(0);
+    const toolMessage = captured[1].messages.find(
+      (m: any) => m.role === "tool",
+    );
+    expect(toolMessage.content).toContain('"ref":"R1-1"');
+    expect(toolMessage.content).not.toContain(reportId);
+    expect(JSON.stringify(captured[0].messages)).not.toContain(reportId);
+    const listed = (
+      await a.get(`/api/ai/conversations/${conversationId}/messages`)
+    ).body.items.find(
+      (m: any) => m.request_id === r.body.requestId && m.role === "assistant",
+    );
+    expect(listed.citations).toHaveLength(2);
     await post(`/api/ai/providers/${providerId}/models`, {
       modelId: "test-model",
     });

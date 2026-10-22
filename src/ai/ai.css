@@ -352,3 +352,121 @@
   padding: 8px 0;
   color: var(--muted);
 }
+.chat-content.md {
+  white-space: normal;
+}
+.chat-content.md > :first-child {
+  margin-top: 0;
+}
+.chat-content.md > :last-child {
+  margin-bottom: 0;
+}
+.chat-content.md p,
+.chat-content.md ul,
+.chat-content.md ol,
+.chat-content.md blockquote,
+.chat-content.md pre,
+.chat-content.md .md-table {
+  margin: 0 0 10px;
+}
+.chat-content.md ul,
+.chat-content.md ol {
+  padding-left: 22px;
+}
+.chat-content.md h3,
+.chat-content.md h4,
+.chat-content.md h5,
+.chat-content.md h6 {
+  margin: 14px 0 6px;
+  font-size: 15px;
+  line-height: 1.4;
+}
+.chat-content.md code {
+  font-size: 12.5px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--ink, #20334a) 8%, transparent);
+}
+.chat-content.md pre {
+  overflow-x: auto;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--ink, #20334a) 6%, transparent);
+}
+.chat-content.md pre code {
+  padding: 0;
+  background: none;
+}
+.chat-content.md blockquote {
+  padding-left: 12px;
+  border-left: 3px solid var(--line, #d9e3ee);
+  color: var(--muted, #5b6b7f);
+}
+.chat-content.md hr {
+  border: 0;
+  border-top: 1px solid var(--line, #d9e3ee);
+  margin: 12px 0;
+}
+.chat-content.md .md-table {
+  overflow-x: auto;
+}
+.chat-content.md table {
+  border-collapse: collapse;
+  font-size: 13px;
+  min-width: 100%;
+}
+.chat-content.md th,
+.chat-content.md td {
+  border: 1px solid var(--line, #d9e3ee);
+  padding: 5px 8px;
+  font-size: 13px;
+  line-height: 1.5;
+  letter-spacing: normal;
+  text-transform: none;
+  text-align: left;
+  vertical-align: top;
+}
+.chat-content.md th {
+  font-weight: 600;
+  color: inherit;
+  background: color-mix(in srgb, #268a98 8%, var(--panel, #fff));
+}
+.chat-content.md a {
+  color: #268a98;
+}
+.citation-group {
+  white-space: nowrap;
+}
+/* Scoped under .chat-content so it beats `.research-page button`. */
+.chat-content .citation {
+  display: inline-block;
+  margin: 0 2px;
+  padding: 0 6px;
+  border: 1px solid color-mix(in srgb, #268a98 45%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, #268a98 10%, var(--panel, #fff));
+  color: inherit;
+  font: inherit;
+  font-size: 11.5px;
+  line-height: 1.6;
+  cursor: pointer;
+  vertical-align: baseline;
+}
+.chat-content .citation:disabled {
+  cursor: default;
+  opacity: 0.75;
+}
+.chat-content .citation.unseen,
+.chat-content .citation.invalid {
+  border-style: dashed;
+  border-color: #c98a12;
+  background: color-mix(in srgb, #c98a12 12%, var(--panel, #fff));
+}
+.chat-content .citation.invalid {
+  text-decoration: line-through;
+}
+.citation-warning {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #a86f00;
+}

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { apiUrl, jsonApi, jsonBody, apiFetch } from "../api";
 import { ModelPicker } from "./AiSettings";
 import { useConfirm } from "../Ui";
+import { Markdown } from "./Markdown";
 import type {
   Conversation,
   Message,
@@ -142,6 +143,7 @@ export function ChatPanel({
             ? {
                 ...m,
                 content: data.content,
+                citations: data.citations,
                 status: data.state,
                 state: data.state,
                 error_message: data.error,
@@ -582,9 +584,34 @@ export function ChatPanel({
                 </small>
               )}
             </header>
-            <div className="chat-content">
-              {m.content || "Đang xử lý dữ liệu…"}
+            <div
+              className={`chat-content${m.role === "assistant" ? " md" : ""}`}
+            >
+              {m.role === "assistant" && m.content ? (
+                <Markdown
+                  text={m.content}
+                  citations={m.citations}
+                  onCite={(c) =>
+                    void onOpenReport(
+                      c.reportId!,
+                      c.rowId ? [c.rowId] : undefined,
+                    ).catch((e) => setError(e.message))
+                  }
+                />
+              ) : (
+                m.content || "Đang xử lý dữ liệu…"
+              )}
             </div>
+            {m.role === "assistant" &&
+              m.citations?.some((c) => c.status !== "ok") && (
+                <p className="citation-warning">
+                  ⚠ {m.citations.filter((c) => c.status === "invalid").length}{" "}
+                  mã nguồn không tồn tại,{" "}
+                  {m.citations.filter((c) => c.status === "unseen").length} mã
+                  trỏ tới dòng AI chưa được xem. Hãy kiểm tra lại các số liệu
+                  liên quan.
+                </p>
+              )}
             {m.error_message && m.role === "assistant" && (
               <p className="ai-error">{m.error_message}</p>
             )}

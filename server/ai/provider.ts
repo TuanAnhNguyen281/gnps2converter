@@ -182,13 +182,20 @@ export async function boundedJson(
     throw new ApiError(502, "Provider trả dữ liệu JSON không hợp lệ.");
   }
 }
+type StreamedToolCall = {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+};
 export async function streamCompletion(
   response: Response,
   onText: (text: string) => Promise<void>,
+  allowTools = false,
 ) {
   const reader = response.body?.getReader();
   if (!reader) throw new ApiError(502, "Provider không trả stream.");
   const decoder = new TextDecoder();
+  const toolCalls: StreamedToolCall[] = [];
   let buffer = "",
     bytes = 0,
     content = "",
@@ -215,19 +222,40 @@ export async function streamCompletion(
       throw new ApiError(502, "Provider lỗi trong quá trình trả lời.");
     if (parsed.usage) usage = parsed.usage;
     const choice = parsed.choices?.[0];
-    if (choice?.finish_reason && choice.finish_reason !== "stop")
+    if (choice?.delta?.tool_calls) {
+      if (!allowTools)
+        throw new ApiError(502, "Provider gửi công cụ ngoài vòng xử lý.");
+      // Tool calls arrive as fragments keyed by index; name/arguments are concatenated.
+      for (const part of choice.delta.tool_calls) {
+        const index = Number.isInteger(part.index) ? part.index : 0;
+        if (index < 0 || index > 5)
+          throw new ApiError(502, "Provider gọi quá nhiều công cụ.");
+        const call = (toolCalls[index] ??= {
+          id: "",
+          type: "function",
+          function: { name: "", arguments: "" },
+        });
+        if (part.id) call.id = part.id;
+        if (part.function?.name) call.function.name += part.function.name;
+        if (part.function?.arguments)
+          call.function.arguments += part.function.arguments;
+      }
+    }
+    const delta = choice?.delta?.content;
+    if (typeof delta === "string" && delta) {
+      content += delta;
+      if (!toolCalls.length) await onText(content);
+    }
+    if (
+      choice?.finish_reason &&
+      choice.finish_reason !== "stop" &&
+      !(choice.finish_reason === "tool_calls" && toolCalls.length)
+    )
       throw new ApiError(
         502,
         "Câu trả lời chưa hoàn chỉnh; hãy giảm phạm vi hoặc tăng giới hạn output.",
         "AI_INCOMPLETE",
       );
-    if (choice?.delta?.tool_calls)
-      throw new ApiError(502, "Provider gửi công cụ ngoài vòng xử lý.");
-    const delta = choice?.delta?.content;
-    if (typeof delta === "string") {
-      content += delta;
-      await onText(content);
-    }
   };
   try {
     while (true) {
@@ -246,13 +274,16 @@ export async function streamCompletion(
       if (done) break;
     }
     if (buffer.trim()) await dispatch(buffer);
-    if (!finished || !content.trim())
+    const calls = toolCalls.filter(Boolean);
+    if (!finished || (!calls.length && !content.trim()))
       throw new ApiError(
         502,
         "Provider kết thúc trước khi hoàn tất câu trả lời.",
         "AI_INCOMPLETE",
       );
-    return { content, usage };
+    if (calls.some((c) => !c.id || !c.function.name))
+      throw new ApiError(502, "Provider gửi công cụ không đầy đủ.");
+    return { content, usage, toolCalls: calls.length ? calls : undefined };
   } finally {
     await reader.cancel().catch(() => {});
   }

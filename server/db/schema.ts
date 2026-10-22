@@ -280,6 +280,7 @@ export const aiMessages = pgTable("ai_messages", {
     .notNull()
     .references(() => aiRequests.id, { onDelete: "cascade" }),
   status: text().notNull(),
+  citations: jsonb(),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),

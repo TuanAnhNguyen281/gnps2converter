@@ -1,3 +1,159 @@
+## Nâng cấp AI giai đoạn 1 — tools, context gọn, stream, Markdown + trích dẫn — 22/10/2026
+
+**Trạng thái: Đã triển khai theo yêu cầu; vẫn giữ gate AI chat · Coming soon.**
+
+- Tools: mỗi tool có mô tả và JSON schema riêng (`required`, enum, giới hạn), zod strict theo từng tool, bỏ tham số `null`. Tool nhận ref `R1`/`R1-12` hoặc UUID cũ. Thêm `adduct`, `sort=abs_ppm_desc` cho `query_report_rows`; `get_compound_details` trả một dòng đầy đủ.
+- Context: prompt dùng ref thay UUID (`toPrompt`), dòng compact bỏ trường rỗng, fragments ≤240 ký tự (chi tiết ≤4000), metadata theo whitelist ≤160 ký tự. Snapshot/tool run lưu DB giữ id đầy đủ để truy nguồn.
+- Stream: bật stream cho mọi vòng khi model có Stream, gom tool_call delta theo index; text trước tool call bị xóa khỏi tin nhắn. Gửi `stream_options.include_usage`.
+- Trích dẫn: system prompt yêu cầu `[R1-12]`; server kiểm tra ok/unseen/invalid khi hoàn tất, lưu `ai_messages.citations` (migration `0004_ai_citations.sql`); lịch sử/excerpt ánh xạ ref cũ sang snapshot mới.
+- UI: `src/ai/Markdown.tsx` render subset Markdown thành React element (không HTML), chip trích dẫn mở báo cáo/dòng, cảnh báo khi có mã sai.
+- Kiểm thử: 78/78 test, build đạt. Đã kiểm tra trực quan bằng research-preview (gate tạm bỏ ở local, đã khôi phục): desktop 1280px và mobile 375px, sáng/tối; bảng, danh sách, code, chip trích dẫn, chip ⚠ cho mã sai và cảnh báo; không cuộn ngang; bấm chip mở đúng report/row, chip sai bị vô hiệu. Đã sửa CSS chip/bảng bị `.research-page button` và `th` toàn cục đè; sửa provider giả lập làm mất xuống dòng khi stream. Chưa thử provider thật (đặc biệt `stream_options` và stream tool_calls).
+
+---
+
+## Cập nhật AI chatbot — MotAPI và quản lý token — 13/10/2026
+
+**Trạng thái: Kế hoạch để review; chưa triển khai thay đổi này.** Phần cập nhật này ưu tiên hơn các quy tắc token trong kế hoạch AI ngày 01/10/2026. Giữ trang **AI chat · Coming soon**, ẩn launcher góc phải và Cài đặt AI; chỉ mở lại sau khi người dùng yêu cầu triển khai/mở tính năng.
+
+### 1. Căn cứ và giới hạn xác minh
+
+- Nhà cung cấp dự kiến: **MộtAPI / MotAPI tại motapis.com**, không nhầm với dịch vụ NLP motapi.com. Tài liệu chính chủ xác nhận Base URL OpenAI-compatible `https://motapis.com/v1`, Bearer key, `/chat/completions`, `/models`, SSE và usage input/output/total. Tiếp tục adapter Chat Completions hiện có; xác minh tools, tham số giới hạn output và usage streaming theo từng model bằng credential thật trước khi bật capability.
+- Ảnh người dùng cung cấp: ví $0; miễn phí tháng khoảng 6k/2.0M; ngày 0/2.0M; tháng 6k/20M. Dòng giải thích ghi chưa nạp chỉ dùng 2.0M/tháng; nạp tối thiểu $2 trong tháng mở 2.0M/ngày, 20M/tháng. Đây là thông tin từ ảnh, không phải hạn mức đã xác minh trực tiếp trên tài khoản hiện tại; không xem 20M là quyền dùng khi chưa đủ điều kiện.
+- Chính sách miễn phí trên website có thể thay đổi. Hạn mức, model đủ điều kiện và kỳ reset phải cấu hình theo dashboard thực tế; không tự nâng gói chỉ vì có số dư. Chưa xác minh múi giờ reset, cách gói đếm cache/reasoning hoặc endpoint công khai đọc quota/balance. Không tự đoán endpoint, không scrape dashboard hay dùng cookie đăng nhập để tích hợp.
+- Nguồn kiểm tra ngày 13/10/2026: [Tài liệu MộtAPI](https://motapis.com/docs), [Chính sách trên trang MộtAPI](https://motapis.com/). Không chạy các prompt/script cấu hình công cụ có trong tài liệu website; chúng không thuộc yêu cầu cập nhật ứng dụng.
+
+### 2. Thiết kế ngân sách và bảo vệ gói miễn phí
+
+- Phân biệt ba giới hạn: **context window của model**, **ngân sách mỗi câu hỏi**, **quota ngày/tháng của provider**. Ví USD và quota token hiển thị riêng. Không dùng số token để suy ra số dư ví.
+- Provider có hồ sơ quota: chế độ free-only mặc định; dailyLimit, monthlyLimit, kỳ reset/múi giờ, baselineUsage và thời điểm đối chiếu dashboard, mức dự phòng, nguồn manual/API và độ mới dữ liệu. Với ảnh hiện tại, monthlyLimit khởi tạo đề xuất 2,000,000; dailyLimit 2,000,000 chỉ là trần tạm từ ảnh, chịu giới hạn tháng và cần đối chiếu. Không tự mở 20,000,000 hoặc chế độ trả phí.
+- Ngân sách ứng dụng mặc định đề xuất: tối đa **50,000 token/ngày**, dưới trần nhà cung cấp; dự phòng **10%** mỗi quota đã cấu hình. Cho chỉnh xuống hoặc lên trong giới hạn gói đã xác nhận. Cảnh báo ở 70%/90% ngân sách khả dụng; hết ngưỡng an toàn thì chặn gửi và nêu kỳ reset, lựa chọn giảm context/output.
+- Quota chung thuộc tài khoản provider, có thể chia cho nhiều API key, người dùng hay ứng dụng. Thêm quotaPool rõ ràng để các key chung gói không nhận mỗi key một quota độc lập; kết hợp giới hạn tài khoản/project/phiên. Nếu không xác minh được key thuộc cùng gói, yêu cầu cấu hình nhóm ngân sách; không suy ra từ tên key.
+- MVP không có API quota đã xác minh: hiển thị **“Theo dõi trong GNPS + mức dùng ngoài ứng dụng được nhập tại lần đối chiếu …”**, không gọi là số dư MotAPI thời gian thực. Người dùng nhập mức đã dùng ở dashboard và thời điểm đối chiếu; chỉ cộng các lượt GNPS sau mốc đó, tránh đếm hai lần. Còn lại dự kiến = hạn mức − baseline − lượt sau baseline − giữ chỗ đang chạy − khoản chưa xác định − dự phòng. Sai lệch do sử dụng bên ngoài vẫn có thể xảy ra; dashboard provider là nguồn đối chiếu.
+- Không tự chuyển từ miễn phí sang trả phí hoặc sang model khác khi hết quota. Chế độ trả phí là lựa chọn riêng của người dùng, có trần USD/ngày/tháng và danh sách model cho phép. Free-only cần xác minh key/model không tự trừ ví theo cơ chế nhà cung cấp; nếu không xác minh được, phải nêu rõ chỉ là giới hạn cục bộ, không bảo đảm không bị tính phí.
+
+### 3. Ba chế độ dùng token đề xuất
+
+Các số sau là ngân sách **toàn bộ câu hỏi qua mọi vòng gọi**, không chỉ câu người dùng gõ; là cấu hình thiết kế, không phải khả năng đã xác minh của MotAPI.
+
+| Chế độ | Trần toàn lượt | Output mỗi lần gọi | Lần gọi model tối đa | Sử dụng |
+|---|---:|---:|---:|---|
+| Tiết kiệm — mặc định | 4,000 token | 512 | 1 | Câu hỏi ngắn, dòng chọn, thống kê đã tính trên server; không model tools |
+| Cân bằng | 8,000 token | 1,024 | 2 | Một vòng lấy dữ liệu qua tools, một vòng trả lời cuối |
+| Phân tích sâu | 16,000 token | 2,048 | 3 | So sánh nhiều báo cáo; người dùng chủ động chọn |
+
+- Trần hiệu dụng là nhỏ nhất của chế độ, giới hạn phiên/project, quota còn lại và context model. Input + output + biên an toàn phải nằm trong context ở từng lần gọi; tổng token input/output cộng dồn của mọi vòng phải nằm trong trần toàn lượt. Không âm thầm nâng chế độ.
+- Trước mỗi vòng tính lại prompt thực tế (bao gồm kết quả tools), phần ngân sách còn lại và output có thể cấp. Thiếu chỗ cho câu trả lời cuối thì không gọi thêm tools; trả lời với nguồn đã có hoặc thông báo thiếu ngân sách. Output bị cắt có nhãn rõ và nút tiếp tục, không tự gửi lượt tiếp.
+
+### 4. Giảm token nhưng giữ độ đúng dữ liệu
+
+- Câu hỏi thống kê/lọc/sắp xếp dùng truy vấn chỉ đọc và phép tính xác định trên server; AI chỉ nhận kết quả cần giải thích. Không bỏ hàng rồi tính thống kê từ mẫu.
+- Context ưu tiên: system ngắn và schema cần thiết → câu hỏi → báo cáo/revision và dòng chọn → dữ liệu liên quan → lịch sử gần nhất. Chỉ gửi trường cần thiết; bỏ payload lặp, base64/ảnh/cột rỗng, không gửi cả file hoặc toàn bộ snapshot DB.
+- Snapshot đầy đủ vẫn lưu để truy xuất nguồn; **snapshot lưu DB khác prompt gửi provider**. Mỗi lượt nêu số dòng đã xét/đã gửi, trường bị cắt; thiếu dữ liệu thì nói rõ. Chọn toàn project không có nghĩa gửi toàn bộ project vào prompt.
+- Lịch sử giới hạn theo token, giữ cặp hỏi/đáp hoàn chỉnh; tóm tắt lưu version/range với nguồn và revision, không xóa bản gốc. Ưu tiên tóm tắt xác định tại server; không tự gọi model thêm để tóm tắt. Đổi revision làm mất hiệu lực nội dung tóm tắt dữ liệu tương ứng.
+- Cache phép tính/context tại server theo owner/project/report revision/filter/sort/row IDs; không dùng lại câu trả lời AI từ dữ liệu khác. Cache cục bộ không đồng nghĩa provider miễn tính input; chỉ hiển thị cached tokens nếu provider xác nhận, không cộng lại vào total nếu đó là phần con của input.
+- Tokenizer theo model khi có metadata đáng tin; model chưa biết dùng dự toán bảo thủ cho tiếng Việt/Unicode, schema, tools và framing. Ghi estimatorVersion/biên sai số, không gọi số ký tự hoặc UTF-8 bytes là số token chính xác. Byte cap giữ riêng để bảo vệ bộ nhớ/network. Kiểm thử và hiệu chỉnh bằng usage thật, không hard-code mọi model dùng một tokenizer.
+
+### 5. Hiển thị token ở câu hỏi và câu trả lời
+
+**Trước gửi**, ngay dưới ô nhập, cập nhật dự toán có debounce; server là nơi xác thực cuối cùng:
+
+- Ví dụ: `Tiết kiệm · Input dự kiến ~1,250 · Output tối đa 512 · Trần lượt 4,000 token`.
+- Mở chi tiết: câu hỏi / hướng dẫn / dữ liệu báo cáo / lịch sử / schema tools. Hiển thị phần bị rút gọn, phạm vi và model thực tế. Các thành phần này là dự toán.
+- Quota hôm nay/tháng: đã xác nhận, đang giữ chỗ, chưa xác định, còn lại dự kiến và thời điểm đối chiếu. Thanh tiến độ không phụ thuộc màu; mobile dùng nhãn ngắn và mục Chi tiết.
+- Khi không đủ ngân sách, disable Gửi và cho giảm output, chọn dòng/phạm vi nhỏ hơn, rút lịch sử hoặc chờ reset. Không mặc định xóa lịch sử để tiết kiệm.
+
+**Trong lúc trả lời**: `Đang trả lời · đã giữ chỗ … token`; nếu chỉ ước tính output đang stream thì dùng dấu ~. Không coi số đoạn stream là số token. Mất SSE chỉ nối lại/poll request cũ.
+
+**Sau trả lời**, dưới từng cặp câu hỏi/trả lời, luôn có nhãn dễ thấy:
+
+- Ví dụ: `Input 1,238 · Output 286 · Tổng 1,524 token · 1 lần gọi` và model thực tế; mở chi tiết các vòng tools, cached/reasoning nếu có, dự toán so với thực tế và chi phí theo phiên bản đơn giá.
+- Input gồm hướng dẫn, câu hỏi, lịch sử, dữ liệu và tools, không chỉ câu người dùng gõ. Các thành phần trước gửi là ước tính; usage tổng sau gửi do provider cung cấp.
+- Nếu chỉ một số vòng có usage: `Đã xác nhận … · còn … vòng chưa xác định`; không trình bày tổng một phần như tổng toàn lượt. Thiếu usage/huỷ/lỗi giữ nhãn chưa xác định, không hiển thị 0. Nếu total_tokens khác input+output, lưu cả hai, giải thích sai lệch thay vì sửa âm thầm.
+- Tổng phiên/project/tài khoản ngày/tháng có trạng thái đầy đủ/một phần. Lịch sử vẫn xem được sau khi đóng phiên hoặc xóa chat; quota không được đặt lại theo việc xóa nội dung.
+
+### 6. Giữ chỗ, quyết toán và lỗi
+
+1. Endpoint preview chỉ dựng context/đếm token, không gọi MotAPI. Trả previewId/hash, report revision, config version, estimator version, expiry, breakdown và trần giữ chỗ. Debounce/cache để tránh truy vấn nặng mỗi phím.
+2. Gửi kèm preview và clientRequestId. Server kiểm tra lại ownership, revision, cấu hình và ngân sách; thay đổi thì yêu cầu preview mới. Không tin số token client gửi. Trong transaction, khóa quotaPool và quota ngày/tháng liên quan, tạo request và reservation đúng một lần; hai tab không vượt trần do race.
+3. Giữ chỗ theo prompt thực tế + output + số vòng có thể cấp trong trần chế độ, thay vì hiện tại dự trữ context tối đa nhân 5 cho mọi model có tools. Trước mỗi upstream attempt kiểm tra phần đã dùng/giữ chỗ và cấp ngân sách vòng. Việc tái gửi lịch sử ở vòng sau vẫn tốn input và phải tính vào tổng.
+4. Khi nhận usage đầy đủ, cộng từng upstream attempt đúng một lần, chuyển reservation sang actual và giải phóng phần không dùng một cách atomic. Preview không giữ quota; request bị chặn trước upstream được hoàn trả. Usage lớn hơn dự toán vẫn ghi đủ và chặn các lượt sau nếu vượt trần.
+5. Lỗi, timeout/cancel hoặc restart sau khi có thể đã gửi upstream: giữ khoản uncertain theo dự toán chưa quyết toán, không tự hoàn trả như chưa gọi. Chỉ giải quyết qua bằng chứng usage/log provider hoặc đối chiếu dashboard có audit. Request hết lease chuyển interrupted; không tự gọi lại.
+6. Idempotency tránh double click/đếm hai lần nhưng không bảo đảm upstream miễn phí cho retry. Retry có attempt riêng và giữ chỗ mới. Không tự retry completion nếu không chắc provider đã nhận; 401/402 không retry; 429 hiển thị thời điểm thử lại theo Retry-After nếu có; 5xx cho retry thủ công. Chat thử cũng phải vào ledger/hạn mức.
+7. Kỳ quota lưu period_start/end theo múi giờ đã xác nhận; ledger giữ thời điểm gửi/hoàn tất và quy tắc attribution provider. Khi chưa rõ reset, dùng chặn bảo thủ qua ranh giới kỳ, không giả định giờ Việt Nam của ứng dụng là giờ MotAPI.
+
+### 7. Thay đổi dự kiến và dữ liệu
+
+- `server/ai/token-budget.ts`, `quota.ts` mới: tokenizer/estimator, packing context, quotaPool, reservation/settlement/unknown, period calculation; giữ SSRF, key mã hóa, quyền sở hữu hiện có.
+- `server/ai/routes.ts`, `context.ts`, `provider.ts`: preview, trần vòng gọi, max output hiệu dụng, usage normalization theo capability. Hiện code dùng byte budget và quota ngày bảo thủ, chưa có quota tháng/settlement; không chỉ đổi AI_DAILY_TOKEN_BUDGET thành 2M rồi coi hoàn tất.
+- Migration mới sau 0003, không sửa migration đã áp dụng: quota policies/pools, các kỳ quota, baseline đối chiếu, append-only token ledger/reservation/attempt usage, estimator snapshot. Ledger không cascade delete theo conversation; xuất usage dài hạn không cần giữ nội dung chat.
+- Usage lưu input/output/provider_total/derived_total, cache/reasoning detail nếu có, usage_source và completeness, upstream request ID, model, từng attempt/vòng, estimated/reserved/actual/uncertain, price version. Chi tiết cache/reasoning là trường phân rã, không cộng hai lần hoặc đoán phí.
+- API dự kiến: `POST /api/ai/conversations/:id/preview`; `GET /api/ai/quota`; cập nhật policy/baseline có xác thực/CSRF và audit; mở rộng request state/events và usage summaries. Không cần SSE event mới nếu state hiện tại đáp ứng UI.
+- `src/ai/ChatPanel.tsx`, `AiSettings.tsx`, `types.ts`: chế độ, preview/breakdown, quota, token dưới từng câu hỏi, cảnh báo, thống kê và cấu hình baseline. Giữ bản nháp khi thay chế độ, chặn response preview cũ ghi đè sau khi đổi câu hỏi/model/context.
+- `.env.example`, README và migration/schema cập nhật sau triển khai; không lưu key trong frontend/localStorage/log. Chỉ định model mặc định từ catalog thực tế, không ghim model/giá lấy từ ví dụ tài liệu.
+
+### 8. Phân kỳ và nghiệm thu
+
+1. Xác minh MotAPI/key/model/quota/reset và khả năng usage/tools/stream bằng một phép thử giới hạn được người dùng cho phép; không cần key để review kế hoạch. Không yêu cầu dán key vào chat.
+2. Triển khai ledger ngày/tháng + reservation/settlement + estimator/preview; kiểm thử trước khi mở UI.
+3. Triển khai ba chế độ và hiển thị token/quota; UI vẫn Coming soon cho đến khi được yêu cầu mở. Nếu yêu cầu “triển khai” chưa nói mở lại, giữ gate và báo rõ.
+4. Kiểm tra trình duyệt desktop/mobile sáng/tối, cùng hai tab, đổi model/phạm vi nhanh; sau đó xác minh MotAPI thật và đối chiếu dashboard. Mock/build không chứng minh usage hoặc miễn phí thực tế.
+
+Tiêu chí đạt:
+
+- Mỗi câu hỏi có dự toán trước gửi và usage thật hoặc trạng thái thiếu sau gửi; mọi vòng gọi cộng đúng, cache/reasoning không cộng lặp.
+- Trần context/mỗi lượt/ngày/tháng đồng thời được áp dụng; dùng chung key/pool không vượt do race, chat thử vào quota, xóa chat không reset lịch sử dùng.
+- Request hoàn tất giải phóng phần dự trữ dư; chưa chắc upstream đã tính phí thì giữ uncertain. Reload/SSE reconnect/cancel/retry/restart không phát sinh gọi/đếm trùng.
+- Tests bao phủ tiếng Việt/Unicode, payload tools lớn, prompt đổi revision, thiếu/partial usage, actual vượt estimate, biên ngày/tháng/múi giờ, quota baseline, API dùng bên ngoài, double click/concurrency và phí/quota tách biệt.
+- Dữ liệu thống kê/nguồn vẫn đúng trên toàn báo cáo; không khẳng định mẫu là toàn bộ, không gửi dữ liệu ngoài scope. Không có ngầm chuyển trả phí/model hoặc tự thêm vòng vượt ngân sách.
+
+---
+
+## Tích hợp avatar Peek — 08/10/2026
+
+**Trạng thái: Đã triển khai sau khi người dùng duyệt “triển khai”.**
+
+### Kết quả triển khai và xác minh
+
+- Đã thêm `UserAvatar`, thay avatar sidebar/menu mobile, topbar và trang Tài khoản; dùng ID ổn định, SVG tròn, biểu cảm happy, style version 1.
+- Đã đưa bốn file lõi SVG nguyên bản vào `src/vendor/peek`, ghim commit `304f354e08c8e8eb7318eadab70f8daf5c97213c`, giữ giấy phép MIT và hướng dẫn cập nhật. Không thêm dependency hoặc thay React/backend.
+- `npm run build` đạt; 5 kiểm thử avatar đạt (đổi tên giữ nguyên ảnh, fallback seed, SVG hợp lệ ở 32/34/60px với tên tiếng Việt/ký tự đặc biệt). `git diff --check` đạt.
+- Đã mở ứng dụng local trong trình duyệt nhưng chưa có phiên đăng nhập. Chưa xác minh trực quan avatar trên workspace, sáng/tối, desktop/mobile hoặc thao tác nút bằng tài khoản thật. Không coi build/tests là bằng chứng hoàn tất browser QA.
+- Mã sinh ảnh dùng data URL và lõi thuần, không có dịch vụ Peek bên ngoài; chưa đo network ở workspace sau đăng nhập.
+
+### Mục tiêu
+
+Thay avatar chữ cái đầu bằng khuôn mặt Peek nhất quán cho mỗi tài khoản. Dùng `user.id` làm seed; chỉ fallback sang tên khi thiếu ID. Đổi tên không làm đổi avatar. Tạo SVG tại trình duyệt, không gửi thông tin người dùng sang dịch vụ ngoài, không cần database mới.
+
+### Khảo sát và quyết định tương thích
+
+- Dự án sử dụng React 18.3.1. npm xác nhận `@doan-labs/peek` bản 1.0.0 khai báo peer React >=19; không cài ép dependency hoặc nâng React toàn dự án chỉ để thêm avatar.
+- Peek có API SVG độc lập `toSvg` và giấy phép MIT. Hướng đề xuất: đưa phần lõi SVG cần thiết từ bản upstream được ghim commit vào `src/vendor/peek/`, giữ LICENSE và ghi nguồn/commit; không lấy component React hay mã website. Kiểm tra cây import thực tế và tương thích TypeScript trước khi đưa vào.
+- Sử dụng `toSvg` để tạo data URL cho thẻ ảnh; tránh chèn chuỗi SVG trực tiếp vào HTML. Ghim phiên bản nhận diện được upstream hỗ trợ để các lần nâng cấp không tự đổi khuôn mặt.
+- Avatar Peek là hiển thị mặc định cho mọi tài khoản, bao gồm Google. Server có trả `avatarUrl` nhưng UI hiện chưa dùng; không thêm lựa chọn ảnh tải lên trong phạm vi này.
+
+### Phạm vi triển khai
+
+1. Tạo `src/UserAvatar.tsx` dùng chung: nhận ID, tên và kích thước; avatar tròn, biểu cảm `happy`, không animation hoặc theo dõi con trỏ trong bản đầu. Tên hỗ trợ truy cập; ở nút đã có nhãn thì ảnh mang tính trang trí để tránh đọc trùng.
+2. Thay ba vị trí trong `src/Workspace.tsx`: hồ sơ sidebar (cả menu mobile dùng chung), nút tài khoản trên topbar và thẻ hồ sơ trang Tài khoản. Xóa helper chữ cái đầu nếu hết sử dụng.
+3. Điều chỉnh `src/workspace.css` để SVG vừa khung 34/32/60px, không co méo hoặc cắt mặt; giữ nguyên hành vi nhấn, trạng thái disabled và focus của nút.
+4. Giữ dữ liệu đăng nhập và backend hiện tại; không migration. Việc chọn biểu cảm, đổi avatar, lưu cấu hình cá nhân và animation tương tác nằm ngoài bản đầu.
+
+### Kiểm chứng và nghiệm thu
+
+- Kiểm tra tính xác định: cùng ID giữ cùng khuôn mặt ở các vị trí và sau khi tải lại; tên tiếng Việt/ký tự đặc biệt không làm hỏng SVG. Không khẳng định mỗi ID là một khuôn mặt duy nhất vì số tổ hợp hữu hạn.
+- Chạy typecheck/build và kiểm thử tập trung cho quy tắc seed, fallback và SVG hợp lệ nếu thêm helper có logic.
+- Kiểm tra trình duyệt ở giao diện sáng/tối, desktop/mobile, sidebar thu gọn/mở rộng, trang Tài khoản; nút avatar vẫn mở đúng trang và không lệch bố cục. Nếu không có phiên đăng nhập để kiểm tra thực tế, ghi rõ giới hạn xác minh.
+- Xác nhận không có request tới Peek khi hiển thị avatar và không có lỗi console do tích hợp.
+
+### Nguồn đã kiểm tra
+
+- https://github.com/doan-labs/peek — README, API và giấy phép.
+- https://raw.githubusercontent.com/doan-labs/peek/main/packages/peek/package.json — peer React >=19.
+- https://raw.githubusercontent.com/doan-labs/peek/main/packages/peek/src/svg.ts — `toSvg`, tùy chọn SVG độc lập.
+- https://peek.doan-labs.com/docs/ — công cụ đọc web chưa truy cập được; thông tin trên được đối chiếu với mã nguồn chính chủ và npm.
+
+---
+
 # Implementation Plan — GNPS2 Converter
 
 ## Nâng cấp AI chatbot theo project và phiên nghiên cứu

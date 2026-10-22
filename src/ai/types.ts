@@ -45,6 +45,12 @@ export interface Conversation {
   title: string;
   archived_at: string | null;
 }
+export interface Citation {
+  ref: string;
+  reportId: string | null;
+  rowId: string | null;
+  status: "ok" | "unseen" | "invalid";
+}
 export interface Message {
   id: string;
   sequence: number;
@@ -56,6 +62,7 @@ export interface Message {
   model_id: string;
   provider_name: string;
   error_message: string | null;
+  citations?: Citation[] | null;
 }
 export interface RequestState {
   contextInfo?: {
@@ -69,6 +76,7 @@ export interface RequestState {
   requestId: string;
   state: string;
   content: string;
+  citations: Citation[] | null;
   error: string | null;
   modelId: string;
   providerName: string;

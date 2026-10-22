@@ -12,6 +12,7 @@ for (const migration of [
   "0001_accounts_reports.sql",
   "0002_research_ai.sql",
   "0003_ai_model_pricing.sql",
+  "0004_ai_citations.sql",
 ])
   await sql.exec(
     await readFile(
@@ -79,14 +80,30 @@ const app = createApp(
       return Response.json({
         choices: [{ finish_reason: "stop", message: { content: "OK" } }],
       });
-    const content =
-      "Theo dữ liệu mẫu, báo cáo có 3 hợp chất: Compound A, Compound B và Compound C. Sai số ppm lớn nhất là 15. Đây là kết quả kiểm tra với provider giả lập; không phải phân tích AI thực.";
+    // Exercises Markdown rendering and citation chips: R1-1..R1-3 exist, R1-9 is deliberately invalid.
+    const content = [
+      "### Tóm tắt báo cáo [R1]",
+      "",
+      "Báo cáo có **3 hợp chất**, tất cả ở trạng thái `matched`.",
+      "",
+      "| Hợp chất | ppm | Nguồn |",
+      "|---|---:|---|",
+      "| Compound A | 1 | [R1-1] |",
+      "| Compound B | 5 | [R1-2] |",
+      "| Compound C | 15 | [R1-3] |",
+      "",
+      "- Sai số lớn nhất: *15 ppm* ở Compound C [R1-3]",
+      "- Hai dòng dưới 10 ppm [R1-1, R1-2]",
+      "- Mã kiểm thử không tồn tại [R1-9]",
+      "",
+      "> Đây là provider giả lập; không phải phân tích AI thực.",
+    ].join("\n");
     if ((body as any).stream) {
       const encoder = new TextEncoder();
       return new Response(
         new ReadableStream({
           async start(controller) {
-            for (const chunk of content.match(/.{1,15}/gu) ?? []) {
+            for (const chunk of content.match(/[\s\S]{1,15}/gu) ?? []) {
               if (signal.aborted) {
                 controller.error(new Error("aborted"));
                 return;
