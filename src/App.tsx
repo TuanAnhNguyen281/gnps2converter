@@ -25,6 +25,9 @@ import { apiFetch, apiUrl, jsonApi, postProgressStream, type PipelineProgress } 
 import { useReport, type SavedResult } from "./useReport";
 import { useAccount } from "./Account";
 import './ai/ai.css';
+import { ResearchWorkspace } from "./ai/ResearchWorkspace";
+import { AiSettings } from "./ai/AiSettings";
+import type { ChatContext } from "./ai/ChatPanel";
 import {
   WorkspaceShell,
   ReportLibrary,
@@ -1872,6 +1875,32 @@ export default function App() {
     }
   }
 
+  // Chat reads the saved revision, so flush edits first and send the grid's selected rows.
+  async function chatContext(): Promise<ChatContext> {
+    if (stage !== "results" || !result) return { reportId: null, revision: 0, selectedRowIds: [] };
+    if (saved.dirty()) await saved.saveNow();
+    const rows = new Set<number>();
+    if (gridSelection?.cells) for (const cell of gridSelection.cells) rows.add(cell.row);
+    else if (gridSelection) {
+      const [from, to] = [gridSelection.anchor.row, gridSelection.focus.row].sort((a, b) => a - b);
+      for (let row = from; row <= to; row++) rows.add(row);
+    }
+    return {
+      reportId: saved.getId(),
+      revision: saved.getRevision(),
+      selectedRowIds: [...rows].map((row) => orderedFilteredRows[row]?.id).filter((id): id is string => !!id),
+      viewState: { filter: query, sort: sort ? JSON.stringify(sort) : "" },
+    };
+  }
+  async function openReportFromChat(id: string, rowIds?: string[]) {
+    const payload = saved.getId() === id && result ? null : await jsonApi<SavedResult>(`/api/reports/${id}`);
+    if (payload) await openReport(payload);
+    else setPage("results");
+    // A single cited row opens its detail view; several rows just open the report.
+    const rows = (payload ?? result)?.rows ?? [];
+    const row = rowIds?.length === 1 ? rows.find((r) => r.id === rowIds[0]) : undefined;
+    if (row) setDetailRow(row);
+  }
   async function navigate(next: WorkspacePage) {
     pendingProject.current=null;
     if (loading || sourceLoading || exporting || structureLoading)
@@ -1940,13 +1969,23 @@ export default function App() {
         />
       )}
       {page === "account" && <AccountPage />}
-      {(page === 'research' || page === 'ai-settings') && (
-        <section className="research-page" aria-labelledby="ai-coming-soon-title">
-          <h1 id="ai-coming-soon-title">AI chat</h1>
-          <p>Coming soon</p>
-          <p>Trợ lý nghiên cứu theo project và phiên làm việc sẽ được mở trong thời gian tới.</p>
-        </section>
+      {page === "research" && (
+        <ResearchWorkspace
+          reportId={stage === "results" ? saved.id : null}
+          beforeSend={chatContext}
+          onOpenReport={openReportFromChat}
+          onCreateReport={async (projectId) => {
+            const oldReportId = saved.getId();
+            await navigate("upload");
+            // navigate() clears it, so set afterwards; attachImportedReport consumes it.
+            pendingProject.current = { id: projectId, oldReportId };
+          }}
+          onSettings={() =>
+            void navigate("ai-settings").catch((e) => setError(e.message))
+          }
+        />
       )}
+      {page === "ai-settings" && <AiSettings />}
       <AnimatePresence mode="wait">
         {page === "upload" ? (
           <motion.section

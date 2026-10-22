@@ -33,12 +33,37 @@ export interface Model {
   currency: string;
   verified_at: string | null;
 }
+export interface ProviderQuota {
+  monthUsed: number;
+  monthLimit: number | null;
+  monthUsable: number | null;
+  dayUsed: number;
+  dayLimit: number | null;
+  dayUsable: number | null;
+  pending: number;
+  estimatedRequests: number;
+  reservePercent: number;
+  timezone: string;
+}
 export interface Provider {
   id: string;
   name: string;
   base_url: string;
   enabled: boolean;
+  monthly_token_limit: string | number | null;
+  daily_token_limit: string | number | null;
+  quota_reserve_percent: number;
+  quota?: ProviderQuota;
   models: Model[];
+}
+export interface ProbeResult {
+  content: string;
+  stream: "ok" | "failed";
+  streamOptions: "accepted" | "rejected" | null;
+  streamUsage: boolean | null;
+  tools: "ok" | "failed";
+  usage: boolean;
+  notes: string[];
 }
 export interface Conversation {
   id: string;
@@ -63,6 +88,7 @@ export interface Message {
   provider_name: string;
   error_message: string | null;
   citations?: Citation[] | null;
+  finish_reason?: string | null;
 }
 export interface RequestState {
   contextInfo?: {
@@ -77,6 +103,7 @@ export interface RequestState {
   state: string;
   content: string;
   citations: Citation[] | null;
+  finishReason: string | null;
   error: string | null;
   modelId: string;
   providerName: string;

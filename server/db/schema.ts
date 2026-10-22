@@ -149,6 +149,13 @@ export const aiProviders = pgTable("ai_providers", {
   secret: jsonb().notNull(),
   keyVersion: text("key_version").notNull().default("v1"),
   enabled: boolean().notNull().default(true),
+  monthlyTokenLimit: bigint("monthly_token_limit", { mode: "number" }).default(
+    2000000,
+  ),
+  dailyTokenLimit: bigint("daily_token_limit", { mode: "number" }).default(
+    2000000,
+  ),
+  quotaReservePercent: integer("quota_reserve_percent").notNull().default(10),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -281,6 +288,7 @@ export const aiMessages = pgTable("ai_messages", {
     .references(() => aiRequests.id, { onDelete: "cascade" }),
   status: text().notNull(),
   citations: jsonb(),
+  finishReason: text("finish_reason"),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),

@@ -13,6 +13,7 @@ for (const migration of [
   "0002_research_ai.sql",
   "0003_ai_model_pricing.sql",
   "0004_ai_citations.sql",
+  "0005_ai_quota_truncation.sql",
 ])
   await sql.exec(
     await readFile(
@@ -76,12 +77,36 @@ const app = createApp(
   async (url, _key, body, signal) => {
     if (url.pathname.endsWith("/models"))
       return Response.json({ data: [{ id: "demo-model" }] });
-    if ((body as any).messages.some((m: any) => m.content === "Reply with OK."))
+    const messages = (body as any).messages as any[],
+      ping = (body as any).tools?.[0]?.function?.name === "ping",
+      probe = messages.some((m) => m.content === "Reply with OK."),
+      // Ask a question containing "thử bị cắt" to see a truncated answer and the Continue button.
+      truncated =
+        !probe &&
+        /thử bị cắt/i.test(
+          messages.filter((m) => m.role === "user").at(-1)?.content,
+        ),
+      finish = truncated ? "length" : "stop";
+    if (ping)
       return Response.json({
-        choices: [{ finish_reason: "stop", message: { content: "OK" } }],
+        choices: [
+          {
+            finish_reason: "tool_calls",
+            message: {
+              tool_calls: [
+                {
+                  id: "ping-1",
+                  type: "function",
+                  function: { name: "ping", arguments: "{}" },
+                },
+              ],
+            },
+          },
+        ],
+        usage: { prompt_tokens: 20, completion_tokens: 5 },
       });
     // Exercises Markdown rendering and citation chips: R1-1..R1-3 exist, R1-9 is deliberately invalid.
-    const content = [
+    const full = [
       "### Tóm tắt báo cáo [R1]",
       "",
       "Báo cáo có **3 hợp chất**, tất cả ở trạng thái `matched`.",
@@ -98,6 +123,7 @@ const app = createApp(
       "",
       "> Đây là provider giả lập; không phải phân tích AI thực.",
     ].join("\n");
+    const content = probe ? "OK" : truncated ? full.slice(0, 160) : full;
     if ((body as any).stream) {
       const encoder = new TextEncoder();
       return new Response(
@@ -117,7 +143,7 @@ const app = createApp(
             }
             controller.enqueue(
               encoder.encode(
-                `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 100, completion_tokens: 40 } })}\n\ndata: [DONE]\n\n`,
+                `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: finish }], usage: { prompt_tokens: 100, completion_tokens: 40 } })}\n\ndata: [DONE]\n\n`,
               ),
             );
             controller.close();
@@ -127,7 +153,7 @@ const app = createApp(
       );
     }
     return Response.json({
-      choices: [{ finish_reason: "stop", message: { content } }],
+      choices: [{ finish_reason: finish, message: { content } }],
       usage: { prompt_tokens: 100, completion_tokens: 40 },
     });
   },

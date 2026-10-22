@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { jsonApi, jsonBody } from "../api";
 import { useConfirm } from "../Ui";
-import type { Provider, Model } from "./types";
+import type { Provider, Model, ProbeResult, ProviderQuota } from "./types";
 export function ModelPicker({
   providers,
   value,
@@ -38,6 +38,71 @@ export function ModelPicker({
     </select>
   );
 }
+const fmt = (n: number | string | null | undefined) =>
+  n === null || n === undefined ? "—" : Number(n).toLocaleString("vi-VN");
+export function QuotaMeter({
+  quota,
+  compact = false,
+}: {
+  quota: ProviderQuota;
+  compact?: boolean;
+}) {
+  const rows = [
+    ["Tháng này", quota.monthUsed, quota.monthUsable],
+    ["Hôm nay", quota.dayUsed, quota.dayUsable],
+  ] as const;
+  return (
+    <div className={`quota-meter${compact ? " compact" : ""}`}>
+      {rows.map(([label, used, usable]) => {
+        const ratio = usable ? used / usable : 0;
+        return (
+          <div key={label} className={ratio >= 0.9 ? "warn" : ""}>
+            <span>
+              {label}: {fmt(used)} /{" "}
+              {usable === null ? "không giới hạn" : `${fmt(usable)} token`}
+              {usable !== null && ratio >= 0.9 && " · sắp hết"}
+            </span>
+            {usable !== null && (
+              <progress
+                max={usable}
+                value={Math.min(used, usable)}
+                aria-label={`Token đã dùng ${label.toLowerCase()}`}
+              />
+            )}
+          </div>
+        );
+      })}
+      {!compact && (
+        <small>
+          Khả dụng = hạn mức provider trừ {quota.reservePercent}% dự phòng. Chỉ
+          tính lượt gửi từ GNPS theo giờ Việt Nam; lượt chưa có usage tính theo
+          mức giữ chỗ, lượt lỗi tính ước tính. Dashboard provider là nguồn đối
+          chiếu.
+        </small>
+      )}
+    </div>
+  );
+}
+const MOTAPI_PRESET = {
+  name: "MộtAPI",
+  url: "https://motapis.com/v1",
+  monthly: "2000000",
+  daily: "2000000",
+  reserve: "10",
+};
+const describeProbe = (c: ProbeResult) =>
+  [
+    `Chat: OK ("${c.content}")`,
+    `Stream: ${
+      c.stream === "ok"
+        ? `OK${c.streamUsage ? " có usage" : " không có usage"}${
+            c.streamOptions === "rejected" ? ", không nhận stream_options" : ""
+          }`
+        : "lỗi"
+    }`,
+    `Tools: ${c.tools === "ok" ? "OK" : "không hỗ trợ"}`,
+    ...c.notes,
+  ].join(" · ");
 export function AiSettings() {
   const [providers, setProviders] = useState<Provider[]>([]),
     [error, setError] = useState(""),
@@ -48,6 +113,9 @@ export function AiSettings() {
     [url, setUrl] = useState(""),
     [key, setKey] = useState(""),
     [enabled, setEnabled] = useState(true),
+    [monthly, setMonthly] = useState(MOTAPI_PRESET.monthly),
+    [daily, setDaily] = useState(MOTAPI_PRESET.daily),
+    [reserve, setReserve] = useState(MOTAPI_PRESET.reserve),
     [defaultModel, setDefaultModel] = useState(""),
     [usage, setUsage] = useState<any>(null);
   const confirm = useConfirm();
@@ -65,14 +133,27 @@ export function AiSettings() {
   useEffect(() => {
     void refresh().catch((e) => setError(e.message));
   }, []);
-  async function act(run: () => Promise<unknown>, message: string) {
+  function resetForm() {
+    setEditing("");
+    setName("");
+    setUrl("");
+    setKey("");
+    setEnabled(true);
+    setMonthly(MOTAPI_PRESET.monthly);
+    setDaily(MOTAPI_PRESET.daily);
+    setReserve(MOTAPI_PRESET.reserve);
+  }
+  async function act(
+    run: () => Promise<unknown>,
+    message: string | ((result: any) => string),
+  ) {
     setBusy(true);
     setError("");
     setNotice("");
     try {
-      await run();
+      const result = await run();
       await refresh();
-      setNotice(message);
+      setNotice(typeof message === "string" ? message : message(result));
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -115,19 +196,32 @@ export function AiSettings() {
                     baseUrl: url,
                     enabled,
                     ...(key ? { apiKey: key } : {}),
+                    monthlyTokenLimit: monthly ? Number(monthly) : null,
+                    dailyTokenLimit: daily ? Number(daily) : null,
+                    quotaReservePercent: Number(reserve || 0),
                   },
                   editing ? "PATCH" : "POST",
                 ),
               );
-              setKey("");
-              setName("");
-              setUrl("");
-              setEditing("");
-              setEnabled(true);
+              resetForm();
             }, "Đã lưu provider.");
           }}
         >
           <h2>{editing ? "Sửa provider" : "Thêm provider"}</h2>
+          {!editing && (
+            <button
+              type="button"
+              onClick={() => {
+                setName(MOTAPI_PRESET.name);
+                setUrl(MOTAPI_PRESET.url);
+                setMonthly(MOTAPI_PRESET.monthly);
+                setDaily(MOTAPI_PRESET.daily);
+                setReserve(MOTAPI_PRESET.reserve);
+              }}
+            >
+              Điền mẫu MộtAPI (gói miễn phí)
+            </button>
+          )}
           <label>
             Tên provider
             <input
@@ -172,20 +266,52 @@ export function AiSettings() {
             />
             Bật provider
           </label>
+          <fieldset className="quota-fields">
+            <legend>Hạn mức token của tài khoản provider</legend>
+            <label>
+              Token/tháng
+              <input
+                type="number"
+                min={1000}
+                step={1000}
+                value={monthly}
+                onChange={(e) => setMonthly(e.target.value)}
+                placeholder="Không giới hạn"
+              />
+            </label>
+            <label>
+              Token/ngày
+              <input
+                type="number"
+                min={1000}
+                step={1000}
+                value={daily}
+                onChange={(e) => setDaily(e.target.value)}
+                placeholder="Không giới hạn"
+              />
+            </label>
+            <label>
+              Dự phòng (%)
+              <input
+                type="number"
+                min={0}
+                max={90}
+                required
+                value={reserve}
+                onChange={(e) => setReserve(e.target.value)}
+              />
+            </label>
+            <small>
+              Gói miễn phí MộtAPI chưa nạp: 2.000.000 token/tháng. Chỉ nâng khi
+              dashboard xác nhận gói lớn hơn. Để trống = không chặn trong ứng
+              dụng.
+            </small>
+          </fieldset>
           <button disabled={busy} type="submit">
             Lưu provider
           </button>
           {editing && (
-            <button
-              type="button"
-              onClick={() => {
-                setEditing("");
-                setName("");
-                setUrl("");
-                setKey("");
-                setEnabled(true);
-              }}
-            >
+            <button type="button" onClick={resetForm}>
               Hủy sửa
             </button>
           )}
@@ -234,6 +360,7 @@ export function AiSettings() {
                 {p.name} {!p.enabled && "· đã tắt"}
               </h2>
               <small>{p.base_url} · API key đã cấu hình</small>
+              {p.quota && <QuotaMeter quota={p.quota} />}
             </div>
             <div className="ai-actions">
               <button
@@ -244,6 +371,17 @@ export function AiSettings() {
                   setUrl(p.base_url);
                   setEnabled(p.enabled);
                   setKey("");
+                  setMonthly(
+                    p.monthly_token_limit === null
+                      ? ""
+                      : String(p.monthly_token_limit),
+                  );
+                  setDaily(
+                    p.daily_token_limit === null
+                      ? ""
+                      : String(p.daily_token_limit),
+                  );
+                  setReserve(String(p.quota_reserve_percent ?? 10));
                 }}
               >
                 Sửa
@@ -286,7 +424,7 @@ export function AiSettings() {
                     await confirm({
                       title: "Chat thử model?",
                       message:
-                        "Phép thử gửi câu hỏi ngắn tới provider và có thể phát sinh phí API.",
+                        "Phép thử gửi 3 yêu cầu ngắn (chat, stream, tools) tới provider và có thể phát sinh phí API.",
                       accept: "Chat thử",
                     })
                   )
@@ -296,7 +434,8 @@ export function AiSettings() {
                           `/api/ai/providers/${p.id}/test`,
                           jsonBody({ modelId: m.model_id }),
                         ),
-                      "Model đã trả lời thử thành công.",
+                      (r: { checks: ProbeResult }) =>
+                        `Đã chat thử. ${describeProbe(r.checks)}. Bật Tools/Stream theo kết quả này.`,
                     );
                 }}
               />

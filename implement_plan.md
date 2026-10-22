@@ -1,3 +1,28 @@
+## Mở AI chat (bỏ gate Coming soon) — 22/10/2026
+
+**Trạng thái: Đã triển khai theo yêu cầu người dùng “bỏ coming soon”.**
+
+- `App.tsx` dùng `ResearchWorkspace` và `AiSettings` thật cho trang `research`/`ai-settings`; nhãn điều hướng đổi thành “AI chat”.
+- Trước khi gửi: nếu báo cáo đang mở có thay đổi thì lưu trước, gửi `reportId` + revision đã lưu, các dòng đang chọn trên lưới (ô/vùng chọn → id dòng theo thứ tự đang hiển thị) và bộ lọc/sắp xếp.
+- Bấm trích dẫn: mở báo cáo (hoặc quay lại báo cáo đang mở); trích dẫn một dòng mở luôn hộp chi tiết dòng đó.
+- “Nhập báo cáo mới” trong project chuyển sang trang tạo báo cáo và gắn báo cáo vừa nhập vào project (dùng `pendingProject` sẵn có).
+- Kiểm tra bằng research-preview: chọn Compound B → AI chat → gửi; snapshot chỉ chứa `row-B`; chip `R1-2` mở chi tiết Compound B; R1-1/R1-3 bị đánh dấu chưa xem đúng. Chưa kiểm tra luồng nhập báo cáo mới đến lúc tự gắn project.
+
+---
+
+## Nâng cấp AI — quota provider, stream_options, câu trả lời bị cắt — 22/10/2026
+
+**Trạng thái: Đã triển khai theo yêu cầu; vẫn giữ gate AI chat · Coming soon.** Provider do người dùng cấu hình trong Cài đặt AI (không dùng provider hệ thống qua env).
+
+- Quota: cột `monthly_token_limit`, `daily_token_limit` (mặc định 2.000.000, NULL = không chặn), `quota_reserve_percent` (mặc định 10) trên `ai_providers` (migration `0005_ai_quota_truncation.sql`). Kiểm tra trong transaction đã khóa `ai_requests` nên hai tab không vượt trần. Lượt lỗi được quyết toán: chưa gọi provider = 0, đã gọi = usage biết được + ước tính lượt dở (byte prompt + max output), nguồn `estimated`. Nút điền mẫu MộtAPI; thanh hạn mức ở thẻ provider và dưới model hiệu lực, cảnh báo từ 90%.
+- `stream_options`: gửi kèm khi stream; HTTP 400/422 thì gửi lại một lần không kèm và ghi nhớ provider|model trong process (mất khi restart).
+- Chat thử (`server/ai/probe.ts`): 3 yêu cầu — chat thường, stream (stream_options/usage), tools (`ping`) — trả `checks` để người dùng bật Tools/Stream theo bằng chứng.
+- Câu trả lời bị cắt: `finish_reason=length` giữ nội dung, lưu `ai_messages.finish_reason`, UI hiện nhãn và nút Tiếp tục ở tin nhắn cuối; tool call bị cắt vẫn là lỗi.
+- Kiểm thử: 82/82 test, typecheck/build đạt; QA trình duyệt bằng research-preview (gate tạm bỏ rồi khôi phục): điền mẫu, lưu provider, Chat thử, quota cập nhật sau lượt, chặn khi vượt hạn mức, cảnh báo 90%, Tiếp tục; desktop/mobile, sáng/tối.
+- Chưa làm/chưa xác minh: chưa thử MộtAPI thật; kỳ reset và múi giờ quota của MộtAPI chưa xác nhận (đang dùng giờ Việt Nam); Chat thử chưa trừ vào hạn mức provider (chỉ vào hạn mức ngày của người dùng); dùng cùng API key ở hai provider sẽ chia đôi hạn mức thay vì dùng chung; mức giữ chỗ vẫn tính theo byte nên rất bảo thủ (~16k token/lượt không tools, ~80k+ khi bật tools).
+
+---
+
 ## Nâng cấp AI giai đoạn 1 — tools, context gọn, stream, Markdown + trích dẫn — 22/10/2026
 
 **Trạng thái: Đã triển khai theo yêu cầu; vẫn giữ gate AI chat · Coming soon.**

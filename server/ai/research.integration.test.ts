@@ -37,6 +37,9 @@ let mode:
     | "wait"
     | "stream"
     | "streamTool"
+    | "truncated"
+    | "streamTruncated"
+    | "noStreamOptions"
     | "unknown" = "success",
   calls = 0,
   captured: any[] = [];
@@ -52,6 +55,49 @@ const transport: ProviderTransport = async (url, _key, body, signal) => {
   calls++;
   captured.push(body);
   if (mode === "failure") return new Response("", { status: 429 });
+  const sse = (chunks: unknown[]) =>
+    new Response(
+      chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("") +
+        "data: [DONE]\n\n",
+      { headers: { "content-type": "text/event-stream" } },
+    );
+  if ((body as any).tools?.[0]?.function?.name === "ping")
+    return Response.json({
+      choices: [
+        {
+          finish_reason: "tool_calls",
+          message: {
+            tool_calls: [
+              {
+                id: "p1",
+                type: "function",
+                function: { name: "ping", arguments: "{}" },
+              },
+            ],
+          },
+        },
+      ],
+    });
+  if (mode === "noStreamOptions" && (body as any).stream_options)
+    return new Response("{}", { status: 400 });
+  if (
+    mode === "noStreamOptions" ||
+    ((body as any).stream && mode === "success")
+  )
+    return sse([
+      { choices: [{ delta: { content: "OK" }, finish_reason: "stop" }] },
+      { choices: [], usage: { prompt_tokens: 3, completion_tokens: 1 } },
+    ]);
+  if (mode === "truncated")
+    return Response.json({
+      choices: [{ finish_reason: "length", message: { content: "Phần đầu" } }],
+      usage: { prompt_tokens: 20, completion_tokens: 32 },
+    });
+  if (mode === "streamTruncated")
+    return sse([
+      { choices: [{ delta: { content: "Phần " } }] },
+      { choices: [{ delta: { content: "đầu" }, finish_reason: "length" }] },
+    ]);
   if (mode === "wait")
     return new Promise((_resolve, reject) => {
       if (signal.aborted) reject(new Error("abort"));
@@ -213,6 +259,7 @@ beforeAll(async () => {
     "0002_research_ai.sql",
     "0003_ai_model_pricing.sql",
     "0004_ai_citations.sql",
+    "0005_ai_quota_truncation.sql",
   ])
     await sql.exec(
       await readFile(
@@ -671,6 +718,96 @@ describe("Research project, provider and persistent chat", () => {
       ).status,
     ).toBe(200);
     expect((await a.get(`/api/reports/${reportId}`)).status).toBe(200);
+  });
+  it("keeps truncated answers and marks them for continuation", async () => {
+    mode = "truncated";
+    let state = await finish((await send()).body.requestId);
+    expect(state.content).toBe("Phần đầu");
+    expect(state.finishReason).toBe("length");
+    await post(`/api/ai/providers/${providerId}/models`, {
+      modelId: "test-model",
+      supportsStream: true,
+    });
+    mode = "streamTruncated";
+    state = await finish((await send()).body.requestId);
+    expect(state.content).toBe("Phần đầu");
+    expect(state.finishReason).toBe("length");
+    const listed = (
+      await a.get(`/api/ai/conversations/${conversationId}/messages`)
+    ).body.items.find(
+      (m: any) => m.request_id === state.requestId && m.role === "assistant",
+    );
+    expect(listed.finish_reason).toBe("length");
+    await post(`/api/ai/providers/${providerId}/models`, {
+      modelId: "test-model",
+    });
+    mode = "success";
+  });
+  it("retries without stream_options once and remembers the model", async () => {
+    await post(`/api/ai/providers/${providerId}/models`, {
+      modelId: "test-model",
+      supportsStream: true,
+    });
+    mode = "noStreamOptions";
+    captured = [];
+    let state = await finish((await send()).body.requestId);
+    expect(state.content).toBe("OK");
+    expect(captured.map((b) => Boolean(b.stream_options))).toEqual([
+      true,
+      false,
+    ]);
+    captured = [];
+    state = await finish((await send()).body.requestId);
+    expect(state.content).toBe("OK");
+    expect(captured.map((b) => Boolean(b.stream_options))).toEqual([false]);
+    await post(`/api/ai/providers/${providerId}/models`, {
+      modelId: "test-model",
+    });
+    mode = "success";
+  });
+  it("chat test probes plain, stream and tool support", async () => {
+    const r = await post(`/api/ai/providers/${providerId}/test`, {
+      modelId: "test-model",
+    });
+    expect(r.status).toBe(200);
+    expect(r.body.checks).toMatchObject({
+      stream: "ok",
+      streamOptions: "accepted",
+      streamUsage: true,
+      tools: "ok",
+      usage: true,
+    });
+  });
+  it("enforces the provider token quota and settles failed calls", async () => {
+    const providers = (await a.get("/api/ai/providers")).body,
+      p = providers.find((x: any) => x.id === providerId);
+    expect(Number(p.monthly_token_limit)).toBe(2000000);
+    expect(p.quota).toMatchObject({
+      monthLimit: 2000000,
+      monthUsable: 1800000,
+      reservePercent: 10,
+    });
+    expect(p.quota.monthUsed).toBeGreaterThan(0);
+    mode = "failure";
+    const failed = await finish((await send()).body.requestId, "failed");
+    expect(failed.usage.usage_source).toBe("estimated");
+    expect(failed.usage.input_tokens).toBeGreaterThan(0);
+    mode = "success";
+    const patch = await a
+      .patch(`/api/ai/providers/${providerId}`)
+      .set("X-CSRF-Token", csrfA)
+      .send({ monthlyTokenLimit: p.quota.monthUsed + 1000 });
+    expect(patch.status).toBe(204);
+    const blocked = await send();
+    expect(blocked.status).toBe(429);
+    expect(blocked.body.code ?? blocked.body.error?.code ?? "").toContain(
+      "AI_PROVIDER_QUOTA",
+    );
+    await a
+      .patch(`/api/ai/providers/${providerId}`)
+      .set("X-CSRF-Token", csrfA)
+      .send({ monthlyTokenLimit: null, dailyTokenLimit: null });
+    expect((await send()).status).toBe(202);
   });
   it("does not silently substitute zero for unknown provider usage", async () => {
     mode = "unknown";

@@ -1,16 +1,20 @@
 import { useEffect, useRef, useState } from "react";
 import { apiUrl, jsonApi, jsonBody, apiFetch } from "../api";
-import { ModelPicker } from "./AiSettings";
+import { ModelPicker, QuotaMeter } from "./AiSettings";
 import { useConfirm } from "../Ui";
 import { Markdown } from "./Markdown";
 import type {
   Conversation,
   Message,
   Provider,
+  ProviderQuota,
   Report,
   RequestState,
   Session,
 } from "./types";
+// Sent as a normal turn: the truncated answer is in history, so the model resumes from it.
+const CONTINUE_PROMPT =
+  "Tiếp tục câu trả lời trước từ đúng chỗ bị cắt, không lặp lại phần đã viết.";
 export interface ChatContext {
   viewState?: { filter: string; sort: string };
   reportId: string | null;
@@ -47,7 +51,22 @@ export function ChatPanel({
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false),
     [request, setRequest] = useState<RequestState | null>(null),
-    [sourceInfo, setSourceInfo] = useState<Record<string, RequestState>>({});
+    [sourceInfo, setSourceInfo] = useState<Record<string, RequestState>>({}),
+    [quotas, setQuotas] = useState<Record<string, ProviderQuota | undefined>>(
+      {},
+    );
+  // Quota is shared by every chat on the provider, so re-read it after each turn.
+  async function refreshQuotas() {
+    try {
+      const list = await jsonApi<Provider[]>("/api/ai/providers");
+      setQuotas(Object.fromEntries(list.map((p) => [p.id, p.quota])));
+    } catch {
+      // Quota display is advisory; the server still enforces the limit.
+    }
+  }
+  useEffect(() => {
+    setQuotas(Object.fromEntries(providers.map((p) => [p.id, p.quota])));
+  }, [providers]);
   const generation = useRef(0),
     stream = useRef<EventSource | null>(null),
     sending = useRef(false),
@@ -144,6 +163,7 @@ export function ChatPanel({
                 ...m,
                 content: data.content,
                 citations: data.citations,
+                finish_reason: data.finishReason,
                 status: data.state,
                 state: data.state,
                 error_message: data.error,
@@ -159,6 +179,7 @@ export function ChatPanel({
           setMessages(loaded.items);
           setCursor(loaded.nextCursor);
           void loadConversations().catch(() => {});
+          void refreshQuotas();
         }
       }
     };
@@ -472,6 +493,9 @@ export function ChatPanel({
         Không có dòng chọn thì lấy tổng hợp báo cáo; AI nêu rõ dữ liệu bị giới
         hạn.
       </small>
+      {quotas[effectiveProviderId] && (
+        <QuotaMeter quota={quotas[effectiveProviderId]!} compact />
+      )}
       {conversation && (
         <div className="ai-actions">
           <button onClick={() => void rename()}>Đổi tên</button>
@@ -615,11 +639,25 @@ export function ChatPanel({
             {m.error_message && m.role === "assistant" && (
               <p className="ai-error">{m.error_message}</p>
             )}
+            {m.role === "assistant" && m.finish_reason === "length" && (
+              <p className="ai-truncated">
+                Câu trả lời bị cắt do chạm giới hạn output của model.
+              </p>
+            )}
             {m.role === "assistant" && (
               <div className="ai-actions">
                 <button onClick={() => void sources(m.request_id)}>
                   Nguồn dữ liệu & token
                 </button>
+                {m.finish_reason === "length" &&
+                  index === messages.length - 1 && (
+                    <button
+                      disabled={busy || active || isArchived}
+                      onClick={() => void send(CONTINUE_PROMPT)}
+                    >
+                      Tiếp tục
+                    </button>
+                  )}
                 {["failed", "cancelled", "interrupted"].includes(m.status) && (
                   <button
                     disabled={busy || active || isArchived}

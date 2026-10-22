@@ -69,7 +69,7 @@ export function WorkspaceShell({
     upload: "Tạo báo cáo mới",
     results: "Chi tiết báo cáo",
     account: "Tài khoản",
-    research: "AI chat · Coming soon",
+    research: "AI chat",
     "ai-settings": "Cài đặt AI",
   };
   async function go(next: WorkspacePage) {
@@ -203,7 +203,7 @@ export function WorkspaceShell({
             { id: "dashboard", icon: "grid", label: "Dashboard" },
             { id: "reports", icon: "reports", label: "Báo cáo của tôi" },
             { id: "upload", icon: "plus", label: "Tạo báo cáo" },
-            { id: "research", icon: "grid", label: "AI chat · Coming soon" },
+            { id: "research", icon: "grid", label: "AI chat" },
             { id: "account", icon: "user", label: "Tài khoản" },
           ] as const
         ).map((item) => (

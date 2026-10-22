@@ -200,6 +200,7 @@ export async function streamCompletion(
     bytes = 0,
     content = "",
     usage: any,
+    finishReason = "stop",
     finished = false;
   const dispatch = async (block: string) => {
     const data = block
@@ -246,9 +247,11 @@ export async function streamCompletion(
       content += delta;
       if (!toolCalls.length) await onText(content);
     }
+    if (choice?.finish_reason) finishReason = choice.finish_reason;
+    // "length" keeps the partial answer; the caller marks it truncated.
     if (
       choice?.finish_reason &&
-      choice.finish_reason !== "stop" &&
+      !["stop", "length"].includes(choice.finish_reason) &&
       !(choice.finish_reason === "tool_calls" && toolCalls.length)
     )
       throw new ApiError(
@@ -283,7 +286,12 @@ export async function streamCompletion(
       );
     if (calls.some((c) => !c.id || !c.function.name))
       throw new ApiError(502, "Provider gửi công cụ không đầy đủ.");
-    return { content, usage, toolCalls: calls.length ? calls : undefined };
+    return {
+      content,
+      usage,
+      finishReason,
+      toolCalls: calls.length ? calls : undefined,
+    };
   } finally {
     await reader.cancel().catch(() => {});
   }

@@ -30,6 +30,8 @@ Tạo hội thoại trong phiên rồi chọn phạm vi dòng đang chọn, báo
 
 Prompt dùng mã tham chiếu ngắn thay cho UUID: `R1` là báo cáo thứ nhất trong snapshot, `R1-12` là dòng thứ 12 của báo cáo đó. Mỗi dòng gửi đi chỉ gồm trường có giá trị, fragments rút gọn (đầy đủ qua `get_compound_details`) và metadata thư viện trong danh sách cho phép (SpectrumID, MQScore, SharedPeaks, SMILES, InChIKey, phân lớp…); snapshot lưu DB vẫn giữ nguyên dòng gốc. Câu trả lời hiển thị Markdown (không render HTML) và trích dẫn `[R1-12]` thành chip mở đúng dòng. Server kiểm tra từng mã: không tồn tại trong snapshot hoặc trỏ tới dòng AI chưa được xem sẽ bị đánh dấu ⚠. Mã của câu trả lời cũ được ánh xạ lại theo snapshot mới khi đưa vào lịch sử. Provider bật Stream được stream cả các vòng có tools, kèm `stream_options.include_usage` để nhận usage.
 
+Mỗi provider có hạn mức token theo tài khoản provider (mặc định gói miễn phí MộtAPI chưa nạp: 2.000.000 token/tháng, trần 2.000.000/ngày) và phần trăm dự phòng (mặc định 10%); nút **Điền mẫu MộtAPI** điền sẵn tên, Base URL `https://motapis.com/v1` và hạn mức, người dùng tự nhập API key. Trước mỗi lượt, server cộng usage của provider trong tháng/ngày (giờ Việt Nam): lượt hoàn tất tính usage thật, lượt đang chạy hoặc không có usage tính mức giữ chỗ, lượt lỗi sau khi đã gọi provider tính ước tính, lượt lỗi trước khi gọi tính 0. Không đủ hạn mức khả dụng thì chặn và báo rõ; để trống hạn mức nghĩa là không chặn. **Chat thử** kiểm tra chat, stream (kèm usage, `stream_options`) và tools để quyết định bật Tools/Stream. Provider từ chối `stream_options` được gửi lại một lần không kèm và ghi nhớ trong process. Câu trả lời chạm giới hạn output được giữ, gắn nhãn bị cắt và có nút **Tiếp tục**.
+
 - Project, phiên, hội thoại, tin nhắn, nguồn/revision, request state và usage được lưu PostgreSQL. Phiên nghiên cứu độc lập với cookie đăng nhập.
 - Đổi model chỉ ảnh hưởng lượt tiếp theo. Thứ tự ưu tiên: lượt chat → phiên → project → tài khoản. Giao diện hiển thị provider/model hiệu lực; không tự chuyển provider khi lỗi.
 - Câu hỏi được lưu trước khi gọi provider; lỗi/dừng/gián đoạn vẫn giữ lịch sử. Gửi trùng dùng request ID và fingerprint; không tự gọi lại model khi SSE mất kết nối.
@@ -39,7 +41,7 @@ Prompt dùng mã tham chiếu ngắn thay cho UUID: `R1` là báo cáo thứ nh�
 
 ### Cấu hình máy chủ AI
 
-Chạy `npm run db:migrate` để áp dụng `0002_research_ai.sql`, `0003_ai_model_pricing.sql` và `0004_ai_citations.sql` (chỉ thêm bảng/cột/ràng buộc; không chuyển hoặc xóa báo cáo cũ). Khai báo các biến trong `.env.example`:
+Chạy `npm run db:migrate` để áp dụng `0002_research_ai.sql` đến `0005_ai_quota_truncation.sql` (chỉ thêm bảng/cột/ràng buộc; không chuyển hoặc xóa báo cáo cũ). Khai báo các biến trong `.env.example`:
 
 ```text
 AI_ENCRYPTION_KEY=<64 ký tự hex ngẫu nhiên, tương đương 32 byte>
