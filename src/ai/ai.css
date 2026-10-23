@@ -554,3 +554,8 @@
   color: #a86f00;
   font-weight: 600;
 }
+.send-scope {
+  margin: 6px 0 0;
+  font-size: 12px;
+  font-weight: 600;
+}

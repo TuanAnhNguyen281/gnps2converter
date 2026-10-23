@@ -12,6 +12,7 @@ export function ResearchWorkspace({
   onCreateReport,
   onSettings,
   compact = false,
+  contextKey,
 }: {
   reportId: string | null;
   beforeSend: (options?: { save?: boolean }) => Promise<ChatContext>;
@@ -19,6 +20,7 @@ export function ResearchWorkspace({
   onCreateReport: (projectId: string) => Promise<void>;
   onSettings: () => void;
   compact?: boolean;
+  contextKey?: unknown;
 }) {
   const { user } = useAccount(),
     confirm = useConfirm(),
@@ -544,6 +546,7 @@ export function ResearchWorkspace({
               reports={reports}
               providers={providers}
               compact={compact}
+              contextKey={contextKey}
               beforeSend={context}
               onOpenReport={onOpenReport}
             />

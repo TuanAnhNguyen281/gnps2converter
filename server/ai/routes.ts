@@ -1131,6 +1131,12 @@ export function researchRouter(
         );
         return {
           prompt,
+          reports: ctx.reports.map((r) => ({
+            id: r.id,
+            title: r.title,
+            revision: r.revision,
+            rowCount: r.rows.length,
+          })),
           quota: providerQuota(p, await providerUsage(c, p.id)),
         };
       });
@@ -1180,6 +1186,7 @@ export function researchRouter(
           truncated: prompt.initial.truncated,
         },
         history: { included: prompt.included, omitted: prompt.omitted },
+        reports: preview.reports,
         quota,
         fits: !blocked && !tooLarge,
         reason: tooLarge

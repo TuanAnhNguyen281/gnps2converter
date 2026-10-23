@@ -954,6 +954,7 @@ export default function App() {
   const [loadingMode, setLoadingMode] = useState<"task" | "files" | null>(null);
   const [loadingProgress, setLoadingProgress] = useState<PipelineProgress | null>(null);
   const [detailRow, setDetailRow] = useState<MatchRow | null>(null);
+  const [chatOpen, setChatOpen] = useState(false);
   const [viewerTarget, setViewerTarget] = useState<PreviewKind | null>(null);
   const [gnpsViewerOpen, setGnpsViewerOpen] = useState(false);
   const [gnpsFrameVersion, setGnpsFrameVersion] = useState(0);
@@ -3144,6 +3145,35 @@ export default function App() {
           </motion.div>
         )}
       </AnimatePresence>
+      {page === "results" && stage === "results" && saved.id && !chatOpen && (
+        <button className="ai-launcher" onClick={() => setChatOpen(true)}>
+          AI chat · Project
+        </button>
+      )}
+      {page === "results" && stage === "results" && chatOpen && (
+        <aside className="ai-drawer" aria-label="AI chat theo project">
+          <button className="ai-drawer-close" onClick={() => setChatOpen(false)}>
+            Đóng chat
+          </button>
+          <ResearchWorkspace
+            compact
+            reportId={saved.id}
+            contextKey={gridSelection}
+            beforeSend={chatContext}
+            onOpenReport={openReportFromChat}
+            onCreateReport={async (projectId) => {
+              setChatOpen(false);
+              const oldReportId = saved.getId();
+              await navigate("upload");
+              pendingProject.current = { id: projectId, oldReportId };
+            }}
+            onSettings={() => {
+              setChatOpen(false);
+              void navigate("ai-settings").catch((e) => setError(e.message));
+            }}
+          />
+        </aside>
+      )}
     </WorkspaceShell>
   );
 }

@@ -30,6 +30,7 @@ export function ChatPanel({
   beforeSend,
   onOpenReport,
   compact = false,
+  contextKey,
 }: {
   session: Session;
   reports: Report[];
@@ -38,6 +39,8 @@ export function ChatPanel({
   beforeSend: (options?: { save?: boolean }) => Promise<ChatContext>;
   onOpenReport: (id: string, rowIds?: string[]) => Promise<void>;
   compact?: boolean;
+  // Changes when the host's selection/report changes, so the preview refreshes.
+  contextKey?: unknown;
 }) {
   const [conversations, setConversations] = useState<Conversation[]>([]),
     [conversationSearch, setConversationSearch] = useState(""),
@@ -352,6 +355,7 @@ export function ChatPanel({
     reports,
     messages.length,
     active,
+    contextKey,
   ]);
   async function send(text: string, retryOf?: string) {
     if (
@@ -807,6 +811,22 @@ export function ChatPanel({
             placeholder="Nhập câu hỏi về báo cáo…"
           />
         </label>
+        {preview && (
+          <p className="send-scope">
+            Sẽ gửi:{" "}
+            {scope === "selection" &&
+            preview.rows.examined <
+              preview.reports.reduce((n, r) => n + r.rowCount, 0)
+              ? `${preview.rows.examined} dòng đang chọn`
+              : scope === "project"
+                ? `${preview.reports.length} báo cáo trong project`
+                : "toàn báo cáo"}{" "}
+            ·{" "}
+            {preview.reports
+              .map((r) => `${r.title} (revision ${r.revision})`)
+              .join(", ")}
+          </p>
+        )}
         {preview ? (
           <details className={`token-preview${preview.fits ? "" : " blocked"}`}>
             <summary>
