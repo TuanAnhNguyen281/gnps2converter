@@ -20,6 +20,10 @@ npm run dev
 - Web: `http://localhost:5173`
 - API health: `http://localhost:8787/api/health`
 
+## Mẫu Word tùy chỉnh
+
+Mở **Mẫu Word** trên thanh điều hướng để soạn file Word theo ý mình: tiêu đề, đoạn văn, định dạng, danh sách, ngắt trang và bảng (thêm/xóa hàng/cột, gộp/tách ô, hàng tiêu đề). Chèn **trường dữ liệu** (tiêu đề báo cáo, tham số, số liệu tổng hợp, nháp Kết quả và thảo luận, và các cột của từng hợp chất như tên, m/z, RT, sai số ppm, công thức, ảnh cấu trúc, SpectrumID, MQScore…) bằng cách bấm ở bảng bên. Đánh dấu một hàng của bảng là **Lặp theo dòng dữ liệu** để mỗi hợp chất sinh một hàng; chọn lọc dòng (đã chọn/tất cả/theo trạng thái) và thứ tự. Mẫu tự lưu; tab **Xem trước với dữ liệu** hiển thị mẫu với một báo cáo đã lưu. Trên màn báo cáo, chọn mẫu cạnh nút **Xuất Word**; máy chủ dựng file từ revision đã lưu và lưu bản xuất như mẫu mặc định. Chạy `npm run db:migrate` để áp dụng `0010_report_templates.sql`.
+
 ## Project và AI chat nghiên cứu
 
 Sau khi đăng nhập, mở **Project & AI chat** trên thanh điều hướng. Tạo project, ghi mục tiêu nghiên cứu, tạo phiên và thêm báo cáo có sẵn. **Nhập báo cáo mới** từ project sẽ gắn báo cáo vừa nhập vào project đó. Báo cáo cũ không tự gắn project. Một báo cáo thuộc một project; không chuyển ngầm giữa các project.

@@ -1,6 +1,6 @@
 ## Mẫu Word tùy chỉnh (custom DOCX) — 23/10/2026
 
-**Trạng thái: Đang triển khai trên nhánh `feat/custom-docx`.** Yêu cầu gốc: ngoài xuất Word mặc định, cho người dùng tự soạn nội dung DOCX bằng giao diện giống Word, có bảng, và gán giá trị hiển thị theo dữ liệu báo cáo.
+**Trạng thái: Đã triển khai trên nhánh `feat/custom-docx` (chưa merge/push).** Yêu cầu gốc: ngoài xuất Word mặc định, cho người dùng tự soạn nội dung DOCX bằng giao diện giống Word, có bảng, và gán giá trị hiển thị theo dữ liệu báo cáo.
 
 ### Đặc tả đã chỉnh
 
@@ -17,6 +17,13 @@
 - **Xuất**: màn báo cáo có lựa chọn mẫu cạnh nút “Xuất Word” (Mặc định hoặc mẫu tùy chỉnh). Server dựng DOCX bằng thư viện `docx` từ revision đã lưu (không tin dữ liệu client), lưu bản xuất vào “Ảnh và file” như mẫu mặc định.
 - **An toàn**: server chỉ nhận các loại node/mark/thuộc tính trong danh sách cho phép và khóa trường hợp lệ; văn bản được thư viện `docx` escape; ảnh chỉ lấy từ ảnh cấu trúc đã lưu của báo cáo.
 - **Ngoài phạm vi bản này**: chèn ảnh tĩnh/logo, header/footer, cỡ chữ/màu chữ tùy ý, nhập file .docx có sẵn làm mẫu.
+
+### Kết quả triển khai
+
+- Server: migration `0010_report_templates.sql`; `server/shared/report-template.ts` (danh mục trường, định dạng, hàng lặp, sanitizer — dùng chung với xem trước); `server/templates/render.ts` dựng DOCX bằng `docx`; `server/templates/routes.ts` CRUD/nhân bản; `POST /api/reports/:id/export/template/:templateId` dùng `prepareExport`/`archiveExport` như xuất mặc định.
+- Client: trang “Mẫu Word” (tải lười, TipTap 3.31.4 — không dùng 2.x vì GHSA-cp6q-959q-f8rh), thanh công cụ, chèn trường, cài đặt hàng lặp, số thập phân, trang A4 + thu phóng “Vừa khung”, tự lưu; xem trước với báo cáo thật; ô chọn mẫu cạnh “Xuất Word”.
+- Kiểm thử: 117 test (render DOCX, sanitizer, trường, API, xem trước). QA research-preview: tạo mẫu cơ bản, chèn trường, tự lưu, đổi bộ lọc hàng lặp và số thập phân (đã lưu server), xem trước 3 dòng, xuất DOCX 200 + lưu bản xuất, ô chọn mẫu trên màn báo cáo.
+- Chưa kiểm: mở file xuất bằng Microsoft Word/LibreOffice để xem định dạng thật; giao diện mobile của trình soạn thảo (bảng rộng, chủ yếu dùng trên máy tính).
 
 ---
 

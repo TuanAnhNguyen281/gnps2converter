@@ -5,7 +5,14 @@ import { apiFetch, apiUrl, jsonApi, jsonBody, setCsrf } from "./api";
 import { Brand, EmptyState, Icon, ThemeButton, useConfirm } from "./Ui";
 import type { SavedResult } from "./useReport";
 export type WorkspacePage =
-  "dashboard" | "reports" | "upload" | "results" | "account" | "research" | "ai-settings";
+  | "dashboard"
+  | "reports"
+  | "upload"
+  | "results"
+  | "account"
+  | "research"
+  | "ai-settings"
+  | "templates";
 interface ReportItem {
   id: string;
   title: string;
@@ -71,6 +78,7 @@ export function WorkspaceShell({
     account: "Tài khoản",
     research: "AI chat",
     "ai-settings": "Cài đặt AI",
+    templates: "Mẫu Word",
   };
   async function go(next: WorkspacePage) {
     if (navigating || locked || leaving) return;
@@ -126,8 +134,7 @@ export function WorkspaceShell({
           loaded.push(...pageResult.items);
           cursor = pageResult.nextCursor;
         } while (cursor && active && reportsRequest.current === requestId);
-        if (active && reportsRequest.current === requestId)
-          setReports(loaded);
+        if (active && reportsRequest.current === requestId) setReports(loaded);
       } catch (e) {
         if (active && reportsRequest.current === requestId)
           setReportsError((e as Error).message || "Không tải được báo cáo.");
@@ -204,6 +211,7 @@ export function WorkspaceShell({
             { id: "reports", icon: "reports", label: "Báo cáo của tôi" },
             { id: "upload", icon: "plus", label: "Tạo báo cáo" },
             { id: "research", icon: "grid", label: "AI chat" },
+            { id: "templates", icon: "file", label: "Mẫu Word" },
             { id: "account", icon: "user", label: "Tài khoản" },
           ] as const
         ).map((item) => (
@@ -224,8 +232,7 @@ export function WorkspaceShell({
           <>
             <span className="nav-section-label">ĐANG LÀM VIỆC</span>
             {reports.map((report) => {
-              const active =
-                page === "results" && report.id === activeReportId;
+              const active = page === "results" && report.id === activeReportId;
               return (
                 <button
                   className={
@@ -249,7 +256,11 @@ export function WorkspaceShell({
               </span>
             )}
             {!reports.length && reportsError && (
-              <span className="nav-report-state" role="status" title={reportsError}>
+              <span
+                className="nav-report-state"
+                role="status"
+                title={reportsError}
+              >
                 Không tải được báo cáo
               </span>
             )}
@@ -302,7 +313,10 @@ export function WorkspaceShell({
       <a href="#workspace-main" className="skip-link">
         Đến nội dung chính
       </a>
-      <aside className="workspace-sidebar" aria-label="Thanh điều hướng workspace">
+      <aside
+        className="workspace-sidebar"
+        aria-label="Thanh điều hướng workspace"
+      >
         {navigation("workspace-sidebar-navigation")}
       </aside>
       <div className="workspace-body">
