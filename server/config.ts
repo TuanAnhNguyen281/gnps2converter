@@ -35,6 +35,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env) {
     aiDailyRequests: integer("AI_DAILY_REQUESTS", 100, 10000),
     aiDailyTokens: integer("AI_DAILY_TOKEN_BUDGET", 500000),
     aiMaxConcurrent: integer("AI_MAX_CONCURRENT", 2, 10),
+    aiMaxQueued: integer("AI_MAX_QUEUED", 20, 1000),
     aiMaxStorageBytes: integer("AI_MAX_STORAGE_BYTES", 50000000),
     aiTimeoutMs: integer("AI_TIMEOUT_MS", 90000, 180000),
     googleId: env.GOOGLE_CLIENT_ID ?? "",

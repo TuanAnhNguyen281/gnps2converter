@@ -113,6 +113,7 @@ export interface Message {
   error_message: string | null;
   citations?: Citation[] | null;
   finish_reason?: string | null;
+  queue_position?: number | null;
 }
 export interface RequestState {
   contextInfo?: {
@@ -128,6 +129,7 @@ export interface RequestState {
   content: string;
   citations: Citation[] | null;
   finishReason: string | null;
+  queuePosition: number | null;
   error: string | null;
   modelId: string;
   providerName: string;

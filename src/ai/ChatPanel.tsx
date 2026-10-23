@@ -190,6 +190,7 @@ export function ChatPanel({
                 content: data.content,
                 citations: data.citations,
                 finish_reason: data.finishReason,
+                queue_position: data.queuePosition,
                 status: data.state,
                 state: data.state,
                 error_message: data.error,
@@ -756,6 +757,9 @@ export function ChatPanel({
                       interrupted: "gián đoạn",
                     } as Record<string, string>
                   )[m.status] ?? m.status}
+                  {m.status === "queued" && m.queue_position
+                    ? ` · vị trí ${m.queue_position} trong hàng đợi`
+                    : ""}
                 </small>
               )}
             </header>

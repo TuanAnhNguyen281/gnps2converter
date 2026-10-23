@@ -265,6 +265,7 @@ beforeAll(async () => {
     "0005_ai_quota_truncation.sql",
     "0006_ai_token_estimate.sql",
     "0007_ai_report_drafts.sql",
+    "0008_ai_request_queue.sql",
   ])
     await sql.exec(
       await readFile(
@@ -599,6 +600,96 @@ describe("Research project, provider and persistent chat", () => {
       modelId: "test-model",
     });
     mode = "success";
+  });
+  it("queues turns beyond AI_MAX_CONCURRENT and runs them when a slot frees", async () => {
+    const conversations = [];
+    for (let i = 0; i < 3; i++)
+      conversations.push(
+        (await post(`/api/research-sessions/${sessionId}/conversations`, {}))
+          .body.id,
+      );
+    const sendTo = (id: string) =>
+      post(`/api/ai/conversations/${id}/messages`, {
+        clientRequestId: randomUUID(),
+        message: "Phân tích báo cáo",
+        context: { reportIds: [reportId], scope: "report" },
+      });
+    mode = "wait";
+    const first = await sendTo(conversations[0]),
+      second = await sendTo(conversations[1]);
+    await finish(first.body.requestId, "running");
+    await finish(second.body.requestId, "running");
+    const third = await sendTo(conversations[2]);
+    expect(third.status).toBe(202);
+    const waiting = (await a.get(`/api/ai/requests/${third.body.requestId}`))
+      .body;
+    expect(waiting.state).toBe("queued");
+    expect(waiting.queuePosition).toBe(1);
+    mode = "success";
+    await post(`/api/ai/requests/${first.body.requestId}/cancel`, {});
+    const done = await finish(third.body.requestId);
+    expect(done.content).toBe("Có 1 hợp chất theo snapshot.");
+    // The stored prompt is only kept while a turn is queued or running.
+    expect(
+      (
+        await db.query("SELECT prompt FROM ai_requests WHERE id=$1", [
+          third.body.requestId,
+        ])
+      ).rows[0].prompt,
+    ).toBeNull();
+    await post(`/api/ai/requests/${second.body.requestId}/cancel`, {});
+    await finish(second.body.requestId, "cancelled");
+    for (const id of conversations)
+      await a.delete(`/api/ai/conversations/${id}`).set("X-CSRF-Token", csrfA);
+  });
+  it("picks up a queued turn left in the database, as after a restart", async () => {
+    const source = (
+      await db.query(
+        "SELECT * FROM ai_requests WHERE owner_id=$1 AND state='completed' ORDER BY started_at DESC LIMIT 1",
+        [userA],
+      )
+    ).rows[0];
+    const fresh = (
+      await post(`/api/research-sessions/${sessionId}/conversations`, {})
+    ).body.id;
+    const id = randomUUID();
+    await db.query(
+      `INSERT INTO ai_requests(id,owner_id,conversation_id,client_request_id,state,provider_id,model_id,provider_name,context_snapshot_id,user_message,request_fingerprint,prompt) VALUES($1,$2,$3,$4,'queued',$5,$6,$7,$8,$9,'',$10)`,
+      [
+        id,
+        userA,
+        fresh,
+        randomUUID(),
+        source.provider_id,
+        source.model_id,
+        source.provider_name,
+        source.context_snapshot_id,
+        source.user_message,
+        JSON.stringify([
+          { role: "system", content: "test" },
+          { role: "user", content: source.user_message },
+        ]),
+      ],
+    );
+    await db.query(
+      `INSERT INTO ai_messages(id,conversation_id,sequence,role,request_id,status) VALUES($1,$2,1,'assistant',$3,'queued')`,
+      [randomUUID(), fresh, id],
+    );
+    await db.query(
+      "INSERT INTO ai_usage(request_id,reserved_tokens) VALUES($1,1000)",
+      [id],
+    );
+    // No send call: the periodic worker must find it.
+    await vi.waitFor(
+      async () =>
+        expect((await a.get(`/api/ai/requests/${id}`)).body.state).toBe(
+          "completed",
+        ),
+      { timeout: 6000, interval: 100 },
+    );
+    // The injected row borrows another conversation's snapshot; drop it first.
+    await db.query("DELETE FROM ai_requests WHERE id=$1", [id]);
+    await a.delete(`/api/ai/conversations/${fresh}`).set("X-CSRF-Token", csrfA);
   });
   it("locks a busy conversation and cancellation preserves status even after upstream abort", async () => {
     mode = "wait";

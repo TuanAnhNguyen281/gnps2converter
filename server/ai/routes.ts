@@ -241,14 +241,28 @@ export function researchRouter(
     ["/projects", "/research-sessions", "/ai"],
     route(async (_req, _res, next) => {
       await transaction(db, async (c) => {
+        // A running turn whose worker stopped heartbeating may already have
+        // reached the provider, so it is never re-run automatically.
         const stale = (
           await c.query(
-            `UPDATE ai_requests SET state='interrupted',error_code='AI_INTERRUPTED',error_message='Backend gián đoạn. Có thể thử lại lượt này.',ended_at=now() WHERE state IN ('queued','running') AND lease_until<now() RETURNING id`,
+            `UPDATE ai_requests SET state='interrupted',error_code='AI_INTERRUPTED',error_message='Backend gián đoạn. Có thể thử lại lượt này.',ended_at=now(),prompt=NULL WHERE state='running' AND lease_until<now() RETURNING id`,
           )
         ).rows;
         for (const r of stale)
           await c.query(
             `UPDATE ai_messages SET status='interrupted' WHERE request_id=$1 AND role='assistant'`,
+            [r.id],
+          );
+        // Queued turns never reached the provider; they wait for a worker,
+        // but not forever.
+        const expired = (
+          await c.query(
+            `UPDATE ai_requests SET state='failed',error_code='AI_QUEUE_TIMEOUT',error_message='Chờ quá lâu trong hàng đợi AI. Hãy gửi lại.',ended_at=now(),prompt=NULL WHERE state='queued' AND started_at<now()-interval '10 minutes' RETURNING id`,
+          )
+        ).rows;
+        for (const r of expired)
+          await c.query(
+            `UPDATE ai_messages SET status='failed' WHERE request_id=$1 AND role='assistant'`,
             [r.id],
           );
       });
@@ -1447,11 +1461,15 @@ export function researchRouter(
         if (
           (
             await c.query(
-              `SELECT count(*)::int AS n FROM ai_requests WHERE state IN ('queued','running')`,
+              `SELECT count(*)::int AS n FROM ai_requests WHERE state='queued'`,
             )
-          ).rows[0].n >= config.aiMaxConcurrent
+          ).rows[0].n >= config.aiMaxQueued
         )
-          throw new ApiError(429, "Máy chủ AI đang bận.");
+          throw new ApiError(
+            429,
+            "Hàng đợi AI đang đầy. Hãy thử lại sau ít phút.",
+            "AI_QUEUE_FULL",
+          );
         if (b.retryOf) {
           const previous = (
             await c.query(
@@ -1541,7 +1559,7 @@ export function researchRouter(
           ],
         );
         await c.query(
-          `INSERT INTO ai_requests(id,owner_id,conversation_id,client_request_id,retry_of,state,provider_id,model_id,provider_name,context_snapshot_id,lease_until,user_message,request_fingerprint) VALUES($1,$2,$3,$4,$5,'queued',$6,$7,$8,$9,now()+interval '45 seconds',$10,$11)`,
+          `INSERT INTO ai_requests(id,owner_id,conversation_id,client_request_id,retry_of,state,provider_id,model_id,provider_name,context_snapshot_id,user_message,request_fingerprint,prompt) VALUES($1,$2,$3,$4,$5,'queued',$6,$7,$8,$9,$10,$11,$12)`,
           [
             requestId,
             user,
@@ -1554,6 +1572,7 @@ export function researchRouter(
             snapshotId,
             b.message,
             fingerprint,
+            JSON.stringify(messages),
           ],
         );
         let seq = Number(
@@ -1604,8 +1623,7 @@ export function researchRouter(
       res
         .status(result.launch ? 202 : 200)
         .json({ requestId: result.requestId, state: result.state });
-      if (result.launch)
-        void execute(requestId, p, messages, ctx).catch(() => {});
+      if (result.launch) void pump();
     }),
   );
   async function execute(
@@ -1675,17 +1693,18 @@ export function researchRouter(
       );
     };
     try {
+      // pump() already claimed the request; stop if it was cancelled meanwhile.
       if (
         !(
           await db.query(
-            `UPDATE ai_requests SET state='running' WHERE id=$1 AND state='queued' RETURNING id`,
-            [id],
+            `SELECT id FROM ai_requests WHERE id=$1 AND state='running' AND worker_id=$2`,
+            [id, workerId],
           )
         ).rows.length
       )
         return;
       await db.query(
-        `UPDATE ai_messages SET status='running' WHERE request_id=$1 AND role='assistant'`,
+        `UPDATE ai_messages SET status='running' WHERE request_id=$1 AND role='assistant' AND status='queued'`,
         [id],
       );
       const budget = Math.min(p.context_limit - p.max_output - 1000, 28000);
@@ -1823,7 +1842,7 @@ export function researchRouter(
           ],
         );
         await c.query(
-          `UPDATE ai_requests SET state='completed',ended_at=now(),lease_until=NULL WHERE id=$1`,
+          `UPDATE ai_requests SET state='completed',ended_at=now(),lease_until=NULL,prompt=NULL WHERE id=$1`,
           [id],
         );
         await c.query(
@@ -1884,7 +1903,7 @@ export function researchRouter(
         if (!r || !["running", "queued"].includes(r.state)) return;
         const state = controller.signal.aborted ? "cancelled" : "failed";
         await c.query(
-          "UPDATE ai_requests SET state=$2,error_code=$3,error_message=$4,ended_at=now(),lease_until=NULL WHERE id=$1",
+          "UPDATE ai_requests SET state=$2,error_code=$3,error_message=$4,ended_at=now(),lease_until=NULL,prompt=NULL WHERE id=$1",
           [id, state, error.code, error.message],
         );
         await c.query(
@@ -1895,8 +1914,82 @@ export function researchRouter(
     } finally {
       clearInterval(heartbeat);
       running.delete(id);
+      void pump();
     }
   }
+  // Durable queue: requests and their prompts live in ai_requests, so any
+  // instance can run them and queued turns survive a restart. The table lock
+  // keeps AI_MAX_CONCURRENT global across instances.
+  const workerId = randomUUID();
+  let pumping = false;
+  async function pump() {
+    if (pumping) return;
+    pumping = true;
+    try {
+      while (true) {
+        const job = await transaction(db, async (c) => {
+          await c.query("LOCK TABLE ai_requests IN SHARE ROW EXCLUSIVE MODE");
+          const busy = (
+            await c.query(
+              "SELECT count(*)::int AS n FROM ai_requests WHERE state='running'",
+            )
+          ).rows[0].n;
+          if (busy >= config.aiMaxConcurrent) return null;
+          return (
+            (
+              await c.query(
+                `UPDATE ai_requests SET state='running',worker_id=$1,claimed_at=now(),lease_until=now()+interval '45 seconds' WHERE id=(SELECT id FROM ai_requests WHERE state='queued' AND prompt IS NOT NULL ORDER BY started_at,id LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING id,owner_id,provider_id,model_id,context_snapshot_id,prompt`,
+                [workerId],
+              )
+            ).rows[0] ?? null
+          );
+        });
+        if (!job) break;
+        void runJob(job);
+      }
+    } catch {
+      // The next tick retries; a failed claim leaves the request queued.
+    } finally {
+      pumping = false;
+    }
+  }
+  async function runJob(job: any) {
+    let p: any, ctx: ResearchContext;
+    try {
+      p = await model(job.owner_id, job.provider_id, job.model_id);
+      ctx = (
+        await db.query(
+          "SELECT payload FROM ai_context_snapshots WHERE id=$1 AND owner_id=$2",
+          [job.context_snapshot_id, job.owner_id],
+        )
+      ).rows[0]?.payload;
+      if (!ctx)
+        throw new ApiError(410, "Không còn snapshot dữ liệu của lượt này.");
+    } catch (e) {
+      // Provider/model was disabled or removed while the turn waited.
+      const error =
+        e instanceof ApiError
+          ? e
+          : new ApiError(500, "Không chuẩn bị được lượt AI.");
+      await db.query(
+        "UPDATE ai_requests SET state='failed',error_code=$2,error_message=$3,ended_at=now(),lease_until=NULL,prompt=NULL WHERE id=$1 AND state='running'",
+        [job.id, error.code, error.message],
+      );
+      await db.query(
+        "UPDATE ai_messages SET status='failed' WHERE request_id=$1 AND role='assistant'",
+        [job.id],
+      );
+      await db.query(
+        "UPDATE ai_usage SET input_tokens=0,output_tokens=0,usage_source='none' WHERE request_id=$1 AND input_tokens IS NULL",
+        [job.id],
+      );
+      void pump();
+      return;
+    }
+    await execute(job.id, p, job.prompt, ctx).catch(() => {});
+  }
+  const poll = setInterval(() => void pump(), 2000);
+  poll.unref?.();
   async function requestState(id: string, user: string) {
     const r = await owned("ai_requests", id, user),
       m = (
@@ -1922,6 +2015,17 @@ export function researchRouter(
       state: r.state,
       content: m?.content ?? "",
       citations: m?.citations ?? null,
+      queuePosition:
+        r.state === "queued"
+          ? Number(
+              (
+                await db.query(
+                  "SELECT count(*)::int AS n FROM ai_requests WHERE state='queued' AND (started_at,id)<=($1,$2)",
+                  [r.started_at, r.id],
+                )
+              ).rows[0].n,
+            )
+          : null,
       finishReason: m?.finish_reason ?? null,
       error: r.error_message,
       modelId: r.model_id,
@@ -2014,7 +2118,7 @@ export function researchRouter(
         if (
           (
             await c.query(
-              `UPDATE ai_requests SET state='cancelled',error_message='Người dùng đã dừng trả lời.',ended_at=now(),lease_until=NULL WHERE id=$1 AND state IN ('queued','running') RETURNING id`,
+              `UPDATE ai_requests SET state='cancelled',error_message='Người dùng đã dừng trả lời.',ended_at=now(),lease_until=NULL,prompt=NULL WHERE id=$1 AND state IN ('queued','running') RETURNING id`,
               [r.id],
             )
           ).rows.length
