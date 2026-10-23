@@ -4,6 +4,11 @@ import { z } from "zod";
 import { estimateCost } from "./pricing.js";
 import { probeModel as probe } from "./probe.js";
 import {
+  defaultLookupFetch,
+  lookupCompound,
+  type LookupFetch,
+} from "./lookup.js";
+import {
   calibrate,
   estimatePromptTokens,
   estimateTextTokens,
@@ -34,6 +39,8 @@ import {
   sourceReferences,
   toPrompt,
   tools,
+  toolsFor,
+  lookupTarget,
   validateCitations,
   type ResearchContext,
 } from "./context.js";
@@ -74,6 +81,7 @@ export function researchRouter(
   db: Database,
   config: Config,
   transport: ProviderTransport = secureTransport,
+  lookupFetch: LookupFetch = defaultLookupFetch,
 ) {
   const router = Router(),
     running = new Map<string, AbortController>();
@@ -324,12 +332,13 @@ export function researchRouter(
             description: z.string().max(4000).optional(),
             researchGoal: z.string().max(4000).optional(),
             archived: z.boolean().optional(),
+            allowExternalLookup: z.boolean().optional(),
           })
           .parse(req.body);
       res.json(
         (
           await db.query(
-            "UPDATE projects SET name=$2,description=$3,research_goal=$4,archived_at=$5,updated_at=now() WHERE id=$1 RETURNING *",
+            "UPDATE projects SET name=$2,description=$3,research_goal=$4,archived_at=$5,allow_external_lookup=$6,updated_at=now() WHERE id=$1 RETURNING *",
             [
               p.id,
               b.name ?? p.name,
@@ -340,6 +349,7 @@ export function researchRouter(
                 : b.archived
                   ? new Date()
                   : null,
+              b.allowExternalLookup ?? p.allow_external_lookup,
             ],
           )
         ).rows[0],
@@ -1267,7 +1277,7 @@ export function researchRouter(
       if (
         bytes(messages) +
           bytes(pair) +
-          (p.supports_tools ? bytes(tools) : 0) +
+          (p.supports_tools ? bytes(toolsFor(ctx)) : 0) +
           500 >
         budget
       )
@@ -1318,12 +1328,12 @@ export function researchRouter(
       if (
         bytes(messages) +
           bytes(compressed) +
-          (p.supports_tools ? bytes(tools) : 0) <
+          (p.supports_tools ? bytes(toolsFor(ctx)) : 0) <
         budget
       )
         messages.splice(2, 0, compressed);
     }
-    const toolDefs = p.supports_tools ? tools : undefined;
+    const toolDefs = p.supports_tools ? toolsFor(ctx) : undefined;
     return {
       messages,
       initial,
@@ -1375,6 +1385,7 @@ export function researchRouter(
         );
         return {
           prompt,
+          tools: toolsFor(ctx),
           suggestions: suggestQuestions(ctx),
           reports: ctx.reports.map((r) => ({
             id: r.id,
@@ -1420,7 +1431,7 @@ export function researchRouter(
           question: part(m.slice(-1)),
           tools: p.supports_tools
             ? calibrate(
-                estimateTextTokens(JSON.stringify(tools)),
+                estimateTextTokens(JSON.stringify(preview.tools)),
                 p.token_calibration,
               )
             : 0,
@@ -1610,7 +1621,7 @@ export function researchRouter(
         )
           throw new ApiError(429, "Đã hết dung lượng context AI.");
         if (
-          bytes(messages) + (p.supports_tools ? bytes(tools) : 0) >
+          bytes(messages) + (p.supports_tools ? bytes(toolsFor(ctx)) : 0) >
             prompt.budget ||
           prompt.estimate + p.max_output > p.context_limit
         )
@@ -1791,11 +1802,12 @@ export function researchRouter(
         `UPDATE ai_messages SET status='running' WHERE request_id=$1 AND role='assistant' AND status='queued'`,
         [id],
       );
-      const budget = Math.min(p.context_limit - p.max_output - 1000, 28000);
+      const budget = Math.min(p.context_limit - p.max_output - 1000, 28000),
+        offered = toolsFor(ctx);
       let finished = false;
       for (let step = 0; step < 5; step++) {
         if (signal.aborted) throw new Error("aborted");
-        if (bytes(messages) + bytes(p.supports_tools ? tools : []) > budget)
+        if (bytes(messages) + bytes(p.supports_tools ? offered : []) > budget)
           throw new ApiError(
             413,
             "Hết ngân sách context. Hãy thu hẹp phạm vi.",
@@ -1808,11 +1820,11 @@ export function researchRouter(
             messages,
             max_tokens: p.max_output,
             stream,
-            ...(enableTools ? { tools, tool_choice: "auto" } : {}),
+            ...(enableTools ? { tools: offered, tool_choice: "auto" } : {}),
           };
         const rawIn = estimatePromptTokens(
             messages,
-            enableTools ? tools : undefined,
+            enableTools ? offered : undefined,
           ),
           estIn = calibrate(rawIn, p.token_calibration);
         if (estIn + p.max_output > p.context_limit)
@@ -1882,7 +1894,10 @@ export function researchRouter(
             } catch {
               throw new ApiError(502, "Tham số công cụ không hợp lệ.");
             }
-            const result = runTool(ctx, call.function.name, args),
+            const result =
+                call.function.name === "lookup_compound"
+                  ? await runLookup(ctx, args)
+                  : runTool(ctx, call.function.name, args),
               fits = Buffer.byteLength(toPrompt(ctx, result)) <= 18000,
               toolResult = fits
                 ? result
@@ -2001,6 +2016,13 @@ export function researchRouter(
       running.delete(id);
       void pump();
     }
+  }
+  async function runLookup(ctx: ResearchContext, args: unknown) {
+    const target = lookupTarget(ctx, args);
+    return {
+      row: target.shown,
+      ...(await lookupCompound(db, lookupFetch, target.row)),
+    };
   }
   // Durable queue: requests and their prompts live in ai_requests, so any
   // instance can run them and queued turns survive a restart. The table lock

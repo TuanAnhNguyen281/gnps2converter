@@ -333,6 +333,30 @@ export function ResearchWorkspace({
                   {project.archived_at ? "Mở lại" : "Lưu trữ"}
                 </button>
               </div>
+              <label className="ai-check lookup-toggle">
+                <input
+                  type="checkbox"
+                  checked={!!project.allow_external_lookup}
+                  disabled={busy || !!project.archived_at}
+                  onChange={(e) => {
+                    const allow = e.target.checked;
+                    void act(async () => {
+                      const p = await jsonApi<Project>(
+                        `/api/projects/${project.id}`,
+                        jsonBody({ allowExternalLookup: allow }, "PATCH"),
+                      );
+                      setProjects((prev) =>
+                        prev.map((x) => (x.id === p.id ? p : x)),
+                      );
+                    });
+                  }}
+                />
+                Cho AI tra cứu PubChem/NPClassifier
+              </label>
+              <small className="lookup-note">
+                Khi bật, InChIKey/SMILES của dòng được hỏi sẽ gửi tới PubChem và
+                NPClassifier (GNPS2); dữ liệu báo cáo khác không gửi đi.
+              </small>
               <label>
                 Phiên nghiên cứu
                 <select

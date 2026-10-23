@@ -4,6 +4,7 @@ export interface Project {
   description: string;
   research_goal: string;
   archived_at: string | null;
+  allow_external_lookup?: boolean;
 }
 export interface Session {
   id: string;

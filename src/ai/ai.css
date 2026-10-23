@@ -684,3 +684,11 @@
   font: inherit;
   font-size: 13px;
 }
+.lookup-toggle {
+  margin-top: 10px;
+}
+.lookup-note {
+  display: block;
+  font-size: 11px;
+  color: var(--muted, #5b6b7f);
+}

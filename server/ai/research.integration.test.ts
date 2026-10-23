@@ -44,8 +44,10 @@ let mode:
     | "truncated"
     | "streamTruncated"
     | "noStreamOptions"
+    | "lookup"
     | "unknown" = "success",
   calls = 0,
+  lookups: string[] = [],
   captured: any[] = [];
 const transport: ProviderTransport = async (url, _key, body, signal) => {
   if (mode === "unknown")
@@ -65,6 +67,30 @@ const transport: ProviderTransport = async (url, _key, body, signal) => {
         "data: [DONE]\n\n",
       { headers: { "content-type": "text/event-stream" } },
     );
+  if (
+    mode === "lookup" &&
+    !(body as any).messages.some((m: any) => m.role === "tool")
+  )
+    return Response.json({
+      choices: [
+        {
+          finish_reason: "tool_calls",
+          message: {
+            tool_calls: [
+              {
+                id: "lk",
+                type: "function",
+                function: {
+                  name: "lookup_compound",
+                  arguments: '{"rowId":"R1-1"}',
+                },
+              },
+            ],
+          },
+        },
+      ],
+      usage: { prompt_tokens: 10, completion_tokens: 2 },
+    });
   if ((body as any).tools?.[0]?.function?.name === "ping")
     return Response.json({
       choices: [
@@ -327,6 +353,10 @@ beforeAll(async () => {
       destroy: async () => {},
     },
     transport,
+    async (url) => {
+      lookups.push(url);
+      return Response.json({});
+    },
   );
   a = supertest.agent(app.app);
   b = supertest.agent(app.app);
@@ -1082,6 +1112,45 @@ describe("Research project, provider and persistent chat", () => {
     expect(
       (await a.get(`/api/ai/reports/${reportId}/discussion`)).body,
     ).toBeNull();
+  });
+  it("offers external lookup only when the project opts in", async () => {
+    await post(`/api/ai/providers/${providerId}/models`, {
+      modelId: "test-model",
+      supportsTools: true,
+    });
+    const names = () =>
+      captured[0].tools.map((t: any) => t.function.name) as string[];
+    mode = "success";
+    captured = [];
+    await finish((await send()).body.requestId);
+    expect(names()).not.toContain("lookup_compound");
+    const patched = await a
+      .patch(`/api/projects/${projectId}`)
+      .set("X-CSRF-Token", csrfA)
+      .send({ allowExternalLookup: true });
+    expect(patched.body.allow_external_lookup).toBe(true);
+    mode = "lookup";
+    captured = [];
+    const state = await finish((await send()).body.requestId);
+    expect(names()).toContain("lookup_compound");
+    expect(state.toolRuns[0]).toMatchObject({
+      tool_name: "lookup_compound",
+      result: {
+        row: { ref: "R1-1" },
+        pubchem: { status: "skipped" },
+        npclassifier: { status: "skipped" },
+      },
+    });
+    // The fixture row has no InChIKey/SMILES, so nothing left the server.
+    expect(lookups).toEqual([]);
+    await a
+      .patch(`/api/projects/${projectId}`)
+      .set("X-CSRF-Token", csrfA)
+      .send({ allowExternalLookup: false });
+    await post(`/api/ai/providers/${providerId}/models`, {
+      modelId: "test-model",
+    });
+    mode = "success";
   });
   it("stores owner feedback on finished answers and exports it", async () => {
     const answers = (

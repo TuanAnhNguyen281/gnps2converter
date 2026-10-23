@@ -3,6 +3,7 @@ import multer from "multer";
 import ExcelJS from "exceljs";
 import JSZip from "jszip";
 import { appendDiscussion } from "./ai/discussion.js";
+import type { LookupFetch } from "./ai/lookup.js";
 import { parse } from "csv-parse/sync";
 import { createRequire } from "node:module";
 import { existsSync } from "node:fs";
@@ -53,6 +54,7 @@ export function createApp(
   db?: Database,
   provider?: MediaProvider,
   aiTransport?: ProviderTransport,
+  lookupFetch?: LookupFetch,
 ) {
   const media = db
     ? new MediaService(db, config, provider ?? cloudinaryProvider(config))
@@ -321,7 +323,8 @@ export function createApp(
     }),
   );
   let active = 0;
-  if (db && reports) app.use("/api", researchRouter(db, config, aiTransport));
+  if (db && reports)
+    app.use("/api", researchRouter(db, config, aiTransport, lookupFetch));
   app.use(
     [
       "/api/analyze",

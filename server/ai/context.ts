@@ -37,7 +37,13 @@ export interface ResearchContext {
     historyOmitted: number;
     summaryVersion: number;
   };
-  project: { id: string; name: string; research_goal: string };
+  project: {
+    id: string;
+    name: string;
+    research_goal: string;
+    // Opt-in for lookup_compound, which sends InChIKey/SMILES to PubChem/NPClassifier.
+    allow_external_lookup?: boolean;
+  };
   session: { id: string; title: string };
   selection: ContextSelection;
   reports: ContextReport[];
@@ -74,7 +80,7 @@ export async function buildContext(
 ): Promise<ResearchContext> {
   const session = (
     await db.query(
-      `SELECT s.id,s.title,s.project_id,s.active_report_id,p.name,p.research_goal FROM research_sessions s JOIN projects p ON p.id=s.project_id AND p.owner_id=s.owner_id WHERE s.id=$1 AND s.owner_id=$2 AND p.archived_at IS NULL AND s.status='active'`,
+      `SELECT s.id,s.title,s.project_id,s.active_report_id,p.name,p.research_goal,p.allow_external_lookup FROM research_sessions s JOIN projects p ON p.id=s.project_id AND p.owner_id=s.owner_id WHERE s.id=$1 AND s.owner_id=$2 AND p.archived_at IS NULL AND s.status='active'`,
       [sessionId, owner],
     )
   ).rows[0];
@@ -127,6 +133,7 @@ export async function buildContext(
       id: session.project_id,
       name: session.name,
       research_goal: session.research_goal,
+      allow_external_lookup: !!session.allow_external_lookup,
     },
     session: { id: session.id, title: session.title },
     selection,
@@ -496,6 +503,18 @@ const toolDefs = {
       })
       .strict(),
   },
+  lookup_compound: {
+    description:
+      "External reference data for one row: PubChem (by the library InChIKey) and NPClassifier pathway/superclass/class (by SMILES). Only available when the project allows external lookup. This describes the library structure, not proof that it is in the sample.",
+    properties: {
+      rowId: {
+        type: "string",
+        description: "Row ref from context, e.g. R1-12.",
+      },
+    },
+    required: ["rowId"],
+    schema: z.object({ rowId: refArg, reportId: refArg.optional() }).strict(),
+  },
   find_duplicates: {
     description:
       "Groups of rows in one report sharing the same compound name, library SpectrumID or molecular formula.",
@@ -529,6 +548,62 @@ export const tools = toolNames.map((name) => ({
     },
   },
 }));
+// Row by ref (R1-12), or by reportId + row UUID for older callers.
+function resolveRow(
+  ctx: ResearchContext,
+  args: { rowId: string; reportId?: string },
+) {
+  let hit = resolveRef(ctx, args.rowId);
+  if (!hit?.row) {
+    const reportIndex = findReport(ctx, args.reportId),
+      rowIndex =
+        reportIndex >= 0
+          ? ctx.reports[reportIndex].rows.findIndex((r) => r.id === args.rowId)
+          : -1;
+    hit =
+      rowIndex >= 0
+        ? {
+            reportIndex,
+            report: ctx.reports[reportIndex],
+            rowIndex,
+            row: ctx.reports[reportIndex].rows[rowIndex],
+          }
+        : null;
+  }
+  if (!hit?.row)
+    throw new ApiError(404, "Công cụ chỉ đọc dòng trong snapshot đã chọn.");
+  return hit as NonNullable<typeof hit> & { row: Record<string, any> };
+}
+// Tools offered to the model for this context; external lookup is opt-in.
+export function toolsFor(ctx: ResearchContext) {
+  return ctx.project.allow_external_lookup
+    ? tools
+    : tools.filter((t) => t.function.name !== "lookup_compound");
+}
+// Validates lookup_compound arguments and returns the row it refers to.
+export function lookupTarget(ctx: ResearchContext, raw: unknown) {
+  if (!ctx.project.allow_external_lookup)
+    throw new ApiError(
+      403,
+      "Project chưa cho phép tra cứu bên ngoài.",
+      "AI_LOOKUP_DISABLED",
+    );
+  const args = toolDefs.lookup_compound.schema.parse(
+    raw && typeof raw === "object" && !Array.isArray(raw)
+      ? Object.fromEntries(Object.entries(raw).filter(([, v]) => v !== null))
+      : raw,
+  );
+  const hit = resolveRow(ctx, args);
+  return {
+    row: hit.row,
+    shown: {
+      reportId: hit.report.id,
+      id: hit.row.id,
+      ref: rowRef(hit.reportIndex, hit.rowIndex),
+      compoundName: hit.row.compoundName,
+    },
+  };
+}
 export function runTool(ctx: ResearchContext, name: string, raw: unknown) {
   if (!Object.hasOwn(toolDefs, name))
     throw new ApiError(400, "Công cụ không được phép.");
@@ -555,28 +630,10 @@ export function runTool(ctx: ResearchContext, name: string, raw: unknown) {
       revision: r.revision,
       rowCount: r.rows.length,
     }));
+  if (name === "lookup_compound")
+    throw new ApiError(400, "Tra cứu ngoài chạy bất đồng bộ qua lookupTarget.");
   if (name === "get_compound_details") {
-    let hit = resolveRef(ctx, args.rowId);
-    if (!hit?.row) {
-      const reportIndex = findReport(ctx, args.reportId),
-        rowIndex =
-          reportIndex >= 0
-            ? ctx.reports[reportIndex].rows.findIndex(
-                (r) => r.id === args.rowId,
-              )
-            : -1;
-      hit =
-        rowIndex >= 0
-          ? {
-              reportIndex,
-              report: ctx.reports[reportIndex],
-              rowIndex,
-              row: ctx.reports[reportIndex].rows[rowIndex],
-            }
-          : null;
-    }
-    if (!hit?.row)
-      throw new ApiError(404, "Công cụ chỉ đọc dòng trong snapshot đã chọn.");
+    const hit = resolveRow(ctx, args as { rowId: string; reportId?: string });
     return {
       reportId: hit.report.id,
       revision: hit.report.revision,
