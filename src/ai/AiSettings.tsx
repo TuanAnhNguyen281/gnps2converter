@@ -101,6 +101,7 @@ interface UsageSummary {
     failed: number;
     input_tokens: number;
     output_tokens: number;
+    cached_input_tokens: number;
     estimated_cost: number | null;
     currency: string | null;
     actual_to_estimate: number | null;
@@ -121,6 +122,7 @@ function UsageTables({ summary }: { summary: UsageSummary }) {
               <th>Lỗi</th>
               <th>Token vào</th>
               <th>Token ra</th>
+              <th>Vào từ cache</th>
               <th>Thực tế/dự toán</th>
               <th>Chi phí ước tính</th>
             </tr>
@@ -135,6 +137,9 @@ function UsageTables({ summary }: { summary: UsageSummary }) {
                 <td>{m.failed}</td>
                 <td>{fmt(m.input_tokens)}</td>
                 <td>{fmt(m.output_tokens)}</td>
+                <td>
+                  {m.cached_input_tokens ? fmt(m.cached_input_tokens) : "—"}
+                </td>
                 <td>
                   {m.actual_to_estimate === null
                     ? "—"

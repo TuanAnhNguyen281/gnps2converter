@@ -148,6 +148,7 @@ export interface RequestState {
   usage: {
     input_tokens: number | null;
     output_tokens: number | null;
+    cached_input_tokens?: number | null;
     usage_source: string;
     estimated_cost: string | null;
     estimated_max_cost: string | null;

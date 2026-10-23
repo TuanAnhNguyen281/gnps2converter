@@ -204,7 +204,11 @@ const transport: ProviderTransport = async (url, _key, body, signal) => {
         message: { content: "Có 1 hợp chất theo snapshot." },
       },
     ],
-    usage: { prompt_tokens: 12, completion_tokens: 5 },
+    usage: {
+      prompt_tokens: 12,
+      completion_tokens: 5,
+      prompt_tokens_details: { cached_tokens: 8 },
+    },
   });
 };
 const row = {
@@ -1085,6 +1089,7 @@ describe("Research project, provider and persistent chat", () => {
     expect(model.requests).toBeGreaterThan(model.failed);
     expect(model.input_tokens).toBeGreaterThan(0);
     expect(model.actual_to_estimate).toBeGreaterThan(0);
+    expect(model.cached_input_tokens).toBeGreaterThan(0);
     expect((await b.get("/api/ai/usage/summary")).body.byModel).toEqual([]);
   });
   it("serves the server-side review queue only to the report owner", async () => {

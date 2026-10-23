@@ -1050,7 +1050,7 @@ export function researchRouter(
           [user, days],
         ),
         db.query(
-          `SELECT r.provider_name,r.model_id,count(*)::int AS requests,count(*) FILTER (WHERE r.state='failed')::int AS failed,count(*) FILTER (WHERE r.state='completed')::int AS completed,coalesce(sum(u.input_tokens),0)::bigint AS input_tokens,coalesce(sum(u.output_tokens),0)::bigint AS output_tokens,sum(u.estimated_cost) AS estimated_cost,max(u.currency) AS currency,
+          `SELECT r.provider_name,r.model_id,count(*)::int AS requests,count(*) FILTER (WHERE r.state='failed')::int AS failed,count(*) FILTER (WHERE r.state='completed')::int AS completed,coalesce(sum(u.input_tokens),0)::bigint AS input_tokens,coalesce(sum(u.output_tokens),0)::bigint AS output_tokens,coalesce(sum(u.cached_input_tokens),0)::bigint AS cached_input_tokens,sum(u.estimated_cost) AS estimated_cost,max(u.currency) AS currency,
              round((sum(u.input_tokens) FILTER (WHERE u.usage_source='provider' AND u.estimated_input_tokens>0))::numeric / nullif(sum(u.estimated_input_tokens) FILTER (WHERE u.usage_source='provider' AND u.estimated_input_tokens>0),0),2) AS actual_to_estimate
            FROM ai_requests r JOIN ai_usage u ON u.request_id=r.id WHERE r.owner_id=$1 AND r.started_at>=${since} GROUP BY 1,2 ORDER BY requests DESC`,
           [user, days],
@@ -1068,6 +1068,7 @@ export function researchRouter(
           ...r,
           input_tokens: Number(r.input_tokens),
           output_tokens: Number(r.output_tokens),
+          cached_input_tokens: Number(r.cached_input_tokens),
           estimated_cost: num(r.estimated_cost),
           actual_to_estimate: num(r.actual_to_estimate),
         })),
@@ -1651,7 +1652,8 @@ export function researchRouter(
       chargedOut = 0,
       inFlight: { in: number; out: number } | null = null,
       // Uncalibrated estimate summed over calls, compared with provider usage.
-      rawEstimated = 0;
+      rawEstimated = 0,
+      cached: number | null = null;
     const toolResults: unknown[] = [];
     const heartbeat = setInterval(() => {
       void db
@@ -1681,6 +1683,13 @@ export function researchRouter(
         chargedIn += a;
         chargedOut += b;
       }
+      // OpenAI-style details, or DeepSeek/Anthropic-style flat fields.
+      const c = token(
+        u?.prompt_tokens_details?.cached_tokens ??
+          u?.prompt_cache_hit_tokens ??
+          u?.cache_read_input_tokens,
+      );
+      if (c !== null) cached = (cached ?? 0) + c;
       inFlight = null;
     };
     const persist = async (text: string) => {
@@ -1846,12 +1855,13 @@ export function researchRouter(
           [id],
         );
         await c.query(
-          "UPDATE ai_usage SET input_tokens=$2,output_tokens=$3,usage_source=$4,reserved_tokens=CASE WHEN $2::integer IS NOT NULL THEN greatest(reserved_tokens,$2+$3) ELSE reserved_tokens END WHERE request_id=$1",
+          "UPDATE ai_usage SET input_tokens=$2,output_tokens=$3,usage_source=$4,reserved_tokens=CASE WHEN $2::integer IS NOT NULL THEN greatest(reserved_tokens,$2+$3) ELSE reserved_tokens END,cached_input_tokens=$5 WHERE request_id=$1",
           [
             id,
             usageKnown ? input : null,
             usageKnown ? output : null,
             usageKnown ? "provider" : "unknown",
+            cached,
           ],
         );
         await c.query(
@@ -2052,7 +2062,7 @@ export function researchRouter(
       toolRuns,
       usage: (
         await db.query(
-          "SELECT input_tokens,output_tokens,usage_source,estimated_cost,estimated_max_cost,currency,pricing_version FROM ai_usage WHERE request_id=$1",
+          "SELECT input_tokens,output_tokens,cached_input_tokens,usage_source,estimated_cost,estimated_max_cost,currency,pricing_version FROM ai_usage WHERE request_id=$1",
           [r.id],
         )
       ).rows[0],

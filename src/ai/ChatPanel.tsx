@@ -940,8 +940,11 @@ export function ChatPanel({
                   vào /{" "}
                   {sourceInfo[m.request_id].usage.output_tokens ??
                     "không xác định"}{" "}
-                  ra · {sourceInfo[m.request_id].toolRuns.length} truy vấn dữ
-                  liệu
+                  ra
+                  {sourceInfo[m.request_id].usage.cached_input_tokens
+                    ? ` (provider báo ${sourceInfo[m.request_id].usage.cached_input_tokens} token vào lấy từ cache)`
+                    : ""}{" "}
+                  · {sourceInfo[m.request_id].toolRuns.length} truy vấn dữ liệu
                 </small>
                 {sourceInfo[m.request_id].contextInfo && (
                   <small>
