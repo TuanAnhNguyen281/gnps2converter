@@ -3,6 +3,10 @@ import multer from "multer";
 import ExcelJS from "exceljs";
 import JSZip from "jszip";
 import { appendDiscussion } from "./ai/discussion.js";
+import { gnpsTask } from "./ai/spectrum.js";
+import { templatesRouter } from "./templates/routes.js";
+import { renderTemplateDocx } from "./templates/render.js";
+import { sanitizePage, sanitizeTemplate } from "./shared/report-template.js";
 import type { LookupFetch } from "./ai/lookup.js";
 import { parse } from "csv-parse/sync";
 import { createRequire } from "node:module";
@@ -325,6 +329,7 @@ export function createApp(
   let active = 0;
   if (db && reports)
     app.use("/api", researchRouter(db, config, aiTransport, aiFetchers));
+  if (db) app.use("/api", templatesRouter(db));
   app.use(
     [
       "/api/analyze",
@@ -634,7 +639,7 @@ export function createApp(
         title: report.title,
         fileName: report.title,
       };
-      res.locals.exportReport = { id, revision: report.revision };
+      res.locals.exportReport = { id, revision: report.revision, report };
       next();
     },
   );
@@ -1321,6 +1326,56 @@ export function createApp(
     return zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
   }
 
+  // Word export from a user template; same saved-revision rules as the default.
+  app.post(
+    "/api/reports/:id/export/template/:templateId",
+    prepareExport,
+    async (request, response, next) => {
+      try {
+        const report = response.locals.exportReport.report,
+          template = (
+            await db!.query(
+              "SELECT * FROM report_templates WHERE id=$1 AND owner_id=$2",
+              [
+                z.string().uuid().parse(request.params.templateId),
+                owner(request),
+              ],
+            )
+          ).rows[0];
+        if (!template) throw new ApiError(404, "Không tìm thấy mẫu Word.");
+        const draft = (
+          await db!.query(
+            "SELECT content FROM ai_report_drafts WHERE report_id=$1",
+            [response.locals.exportReport.id],
+          )
+        ).rows[0];
+        const output = await renderTemplateDocx(
+          sanitizeTemplate(template.content),
+          sanitizePage(template.page),
+          {
+            title: report.title,
+            sourceUrl: report.sourceUrl,
+            task: gnpsTask(report, report.sourceUrl),
+            exportedAt: new Date().toISOString(),
+            parameters: report.parameters,
+            summary: report.summary,
+            rows: report.rows,
+            discussion: draft?.content ?? null,
+          },
+        );
+        const name = safeName(`${report.title} - ${template.name}`);
+        await archiveExport(request, response, output, "docx", name);
+        response.set({
+          "Content-Type":
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          "Content-Disposition": contentDisposition(`${name}.docx`),
+        });
+        response.send(output);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
   app.post(
     "/api/reports/:id/export/docx",
     prepareExport,

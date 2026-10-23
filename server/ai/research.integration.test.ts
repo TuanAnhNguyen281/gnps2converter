@@ -298,6 +298,7 @@ beforeAll(async () => {
     "0007_ai_report_drafts.sql",
     "0008_ai_request_queue.sql",
     "0009_ai_feedback_lookup_vision.sql",
+    "0010_report_templates.sql",
   ])
     await sql.exec(
       await readFile(
@@ -1317,6 +1318,110 @@ describe("Research project, provider and persistent chat", () => {
     expect(model.actual_to_estimate).toBeGreaterThan(0);
     expect(model.cached_input_tokens).toBeGreaterThan(0);
     expect((await b.get("/api/ai/usage/summary")).body.byModel).toEqual([]);
+  });
+  it("manages Word templates and exports a report through one", async () => {
+    const created = await post("/api/report-templates", {
+      name: "Mẫu luận văn",
+    });
+    expect(created.status).toBe(201);
+    const id = created.body.id;
+    expect(created.body.content.content[0].type).toBe("heading");
+    expect((await b.get(`/api/report-templates/${id}`)).status).toBe(404);
+    const patched = await a
+      .patch(`/api/report-templates/${id}`)
+      .set("X-CSRF-Token", csrfA)
+      .send({
+        page: { orientation: "portrait" },
+        content: {
+          type: "doc",
+          content: [
+            {
+              type: "paragraph",
+              content: [
+                { type: "text", text: "Báo cáo: " },
+                { type: "field", attrs: { key: "report.title" } },
+                { type: "field", attrs: { key: "constructor" } },
+              ],
+            },
+            {
+              type: "table",
+              content: [
+                {
+                  type: "tableRow",
+                  attrs: { repeat: { filter: "all", sort: "report" } },
+                  content: [
+                    {
+                      type: "tableCell",
+                      content: [
+                        {
+                          type: "paragraph",
+                          content: [
+                            {
+                              type: "field",
+                              attrs: { key: "row.compoundName" },
+                            },
+                          ],
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      });
+    expect(patched.status).toBe(200);
+    expect(JSON.stringify(patched.body.content)).not.toContain("constructor");
+    expect(patched.body.page.orientation).toBe("portrait");
+    const copy = await post(`/api/report-templates/${id}/duplicate`, {});
+    expect(copy.body.name).toBe("Mẫu luận văn (bản sao)");
+    expect((await a.get("/api/report-templates")).body.length).toBe(2);
+    const saved = (await a.get(`/api/reports/${reportId}`)).body,
+      revision = saved.revision;
+    const docx = await a
+      .post(`/api/reports/${reportId}/export/template/${id}`)
+      .set("X-CSRF-Token", csrfA)
+      .send({ revision })
+      .buffer(true)
+      .parse((res, done) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (c: Buffer) => chunks.push(c));
+        res.on("end", () => done(null, Buffer.concat(chunks)));
+      });
+    expect(docx.status).toBe(200);
+    const xml = await (
+      await JSZip.loadAsync(docx.body)
+    )
+      .file("word/document.xml")!
+      .async("string");
+    expect(xml).toContain("Báo cáo: ");
+    expect(xml).toContain(saved.title);
+    expect(xml).toContain(saved.rows[0].compoundName);
+    expect(
+      (
+        await a
+          .post(`/api/reports/${reportId}/export/template/${id}`)
+          .set("X-CSRF-Token", csrfB)
+          .send({ revision })
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await b
+          .post(`/api/reports/${reportId}/export/template/${id}`)
+          .set("X-CSRF-Token", csrfB)
+          .send({ revision })
+      ).status,
+    ).toBe(404);
+    for (const t of [id, copy.body.id])
+      expect(
+        (
+          await a
+            .delete(`/api/report-templates/${t}`)
+            .set("X-CSRF-Token", csrfA)
+        ).status,
+      ).toBe(204);
   });
   it("serves the server-side review queue only to the report owner", async () => {
     const q = await a.get(`/api/ai/reports/${reportId}/review-queue?limit=5`);

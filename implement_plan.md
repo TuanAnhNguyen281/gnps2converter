@@ -1,3 +1,25 @@
+## Mẫu Word tùy chỉnh (custom DOCX) — 23/10/2026
+
+**Trạng thái: Đang triển khai trên nhánh `feat/custom-docx`.** Yêu cầu gốc: ngoài xuất Word mặc định, cho người dùng tự soạn nội dung DOCX bằng giao diện giống Word, có bảng, và gán giá trị hiển thị theo dữ liệu báo cáo.
+
+### Đặc tả đã chỉnh
+
+- **Trang “Mẫu Word”** (thanh điều hướng): danh sách mẫu của tài khoản; tạo mới (từ “Mẫu cơ bản” giống bảng mặc định hoặc trang trắng), đổi tên, nhân bản, xóa. Tối đa 50 mẫu, nội dung ≤ 500KB.
+- **Trình soạn thảo kiểu Word** (TipTap 2, khổ A4): tiêu đề 1–3, đoạn văn, đậm/nghiêng/gạch chân, căn trái/giữa/phải/đều, danh sách chấm/số, ngắt trang, bảng (thêm/xóa hàng/cột, gộp/tách ô, hàng tiêu đề lặp lại mỗi trang). Thiết lập trang: dọc/ngang, lề (mm).
+- **Trường dữ liệu** chèn dưới dạng thẻ (chip), không gõ cú pháp:
+  - Báo cáo: tiêu đề, ngày xuất, nguồn (link GNPS2/tên file), task GNPS2, chế độ & dung sai m/z, dung sai RT.
+  - Tổng hợp: số dòng TSV, số dòng dữ liệu, đã khớp, chưa khớp, số dòng xuất, số có cấu trúc.
+  - AI: nháp “Kết quả và thảo luận” đã duyệt (khối nhiều đoạn).
+  - Theo dòng (chỉ trong hàng lặp): STT, tên hoạt chất, ion/adduct, m/z precursor, m/z dữ liệu, RT, Δppm, ΔDa, ΔRT, công thức (chỉ số dưới), fragments, trạng thái, số ứng viên, ảnh cấu trúc, SpectrumID, MQScore, SharedPeaks, SMILES, InChIKey, phân lớp NPClassifier.
+  - Trường số có tùy chọn số chữ số thập phân; định dạng số kiểu Việt Nam như mẫu mặc định.
+- **Hàng lặp**: đánh dấu một hàng của bảng “Lặp theo dòng dữ liệu”; khi xuất, hàng được nhân bản cho từng dòng theo bộ lọc của hàng đó: dòng đã chọn (mặc định, giống mẫu mặc định) / tất cả / matched / ambiguous / unmatched; sắp xếp theo thứ tự báo cáo hoặc |ppm| giảm dần.
+- **Xem trước**: chọn một báo cáo đã lưu để xem mẫu với dữ liệu thật (giới hạn 50 dòng lặp trong xem trước).
+- **Xuất**: màn báo cáo có lựa chọn mẫu cạnh nút “Xuất Word” (Mặc định hoặc mẫu tùy chỉnh). Server dựng DOCX bằng thư viện `docx` từ revision đã lưu (không tin dữ liệu client), lưu bản xuất vào “Ảnh và file” như mẫu mặc định.
+- **An toàn**: server chỉ nhận các loại node/mark/thuộc tính trong danh sách cho phép và khóa trường hợp lệ; văn bản được thư viện `docx` escape; ảnh chỉ lấy từ ảnh cấu trúc đã lưu của báo cáo.
+- **Ngoài phạm vi bản này**: chèn ảnh tĩnh/logo, header/footer, cỡ chữ/màu chữ tùy ý, nhập file .docx có sẵn làm mẫu.
+
+---
+
 ## Nâng cấp AI giai đoạn 4 — phản hồi, tra cứu hóa học, ảnh phổ — 23/10/2026
 
 **Trạng thái: Đã triển khai trên nhánh `feat/ai-phase4` (chưa merge/push). Người dùng chọn 3 mục: tra cứu PubChem/NPClassifier, phản hồi + tiến trình, vision.**
