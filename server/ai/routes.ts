@@ -1029,6 +1029,81 @@ export function researchRouter(
       );
     }),
   );
+  async function requireAdmin(user: string) {
+    const u = (
+      await db.query(
+        "SELECT id,lower(email) AS email,email_verified_at FROM users WHERE id=$1",
+        [user],
+      )
+    ).rows[0];
+    const allowed =
+      !!u &&
+      (config.adminUserIds.includes(String(u.id).toLowerCase()) ||
+        (!!u.email_verified_at && config.adminEmails.includes(u.email)));
+    if (!allowed)
+      throw new ApiError(403, "Chỉ quản trị viên được xem.", "FORBIDDEN");
+  }
+  // System-wide aggregates for operators: accounts, models, errors and the
+  // queue. Counts and token totals only; never prompts or answers.
+  router.get(
+    "/ai/admin/usage",
+    route(async (req, res) => {
+      await requireAdmin(owner(req));
+      const days = z.coerce
+          .number()
+          .int()
+          .min(1)
+          .max(90)
+          .default(30)
+          .parse(req.query.days ?? undefined),
+        since = `(date_trunc('day',now() AT TIME ZONE 'Asia/Ho_Chi_Minh') - make_interval(days => $1::int - 1)) AT TIME ZONE 'Asia/Ho_Chi_Minh'`;
+      const [accounts, models, errors, queue] = await Promise.all([
+        db.query(
+          `SELECT u.email,u.display_name,count(*)::int AS requests,count(*) FILTER (WHERE r.state='failed')::int AS failed,coalesce(sum(us.input_tokens),0)::bigint AS input_tokens,coalesce(sum(us.output_tokens),0)::bigint AS output_tokens,coalesce(sum(us.cached_input_tokens),0)::bigint AS cached_input_tokens,max(r.started_at) AS last_request_at
+           FROM ai_requests r JOIN users u ON u.id=r.owner_id JOIN ai_usage us ON us.request_id=r.id WHERE r.started_at>=${since} GROUP BY u.id,u.email,u.display_name ORDER BY coalesce(sum(us.input_tokens),0)+coalesce(sum(us.output_tokens),0) DESC LIMIT 100`,
+          [days],
+        ),
+        db.query(
+          `SELECT r.provider_name,r.model_id,count(DISTINCT r.owner_id)::int AS accounts,count(*)::int AS requests,count(*) FILTER (WHERE r.state='failed')::int AS failed,count(*) FILTER (WHERE r.state='interrupted')::int AS interrupted,coalesce(sum(us.input_tokens),0)::bigint AS input_tokens,coalesce(sum(us.output_tokens),0)::bigint AS output_tokens
+           FROM ai_requests r JOIN ai_usage us ON us.request_id=r.id WHERE r.started_at>=${since} GROUP BY 1,2 ORDER BY requests DESC LIMIT 50`,
+          [days],
+        ),
+        db.query(
+          `SELECT coalesce(error_code,'(không mã)') AS error_code,count(*)::int AS count,max(ended_at) AS last_at,(array_agg(error_message ORDER BY ended_at DESC))[1] AS last_message
+           FROM ai_requests WHERE state IN ('failed','interrupted') AND started_at>=${since} GROUP BY 1 ORDER BY count DESC LIMIT 20`,
+          [days],
+        ),
+        db.query(
+          `SELECT count(*) FILTER (WHERE state='queued')::int AS queued,count(*) FILTER (WHERE state='running')::int AS running,extract(epoch FROM now()-min(started_at) FILTER (WHERE state='queued'))::int AS oldest_queued_seconds FROM ai_requests WHERE state IN ('queued','running')`,
+        ),
+      ]);
+      const n = (rows: any[], keys: string[]) =>
+        rows.map((r) =>
+          Object.fromEntries(
+            Object.entries(r).map(([k, v]) => [
+              k,
+              keys.includes(k) ? Number(v) : v,
+            ]),
+          ),
+        );
+      const tokenKeys = [
+        "input_tokens",
+        "output_tokens",
+        "cached_input_tokens",
+      ];
+      res.json({
+        days,
+        queue: {
+          ...queue.rows[0],
+          maxConcurrent: config.aiMaxConcurrent,
+          maxQueued: config.aiMaxQueued,
+        },
+        accounts: n(accounts.rows, tokenKeys),
+        models: n(models.rows, tokenKeys),
+        errors: errors.rows,
+      });
+    }),
+  );
   // Per-user usage over recent days: by day and by provider/model, with the
   // estimate-vs-provider input ratio that drives token calibration.
   router.get(

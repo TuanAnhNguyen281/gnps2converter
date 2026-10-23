@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { jsonApi, jsonBody } from "../api";
 import { useConfirm } from "../Ui";
 import type { Provider, Model, ProbeResult, ProviderQuota } from "./types";
+import { AdminUsage } from "./AdminUsage";
 export function ModelPicker({
   providers,
   value,
@@ -460,6 +461,7 @@ export function AiSettings() {
         </section>
       </div>
       {summary && <UsageTables summary={summary} />}
+      <AdminUsage />
       {providers.map((p) => (
         <section key={p.id} className="ai-card">
           <div className="ai-card-heading">

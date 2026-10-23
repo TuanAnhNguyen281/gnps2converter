@@ -1,3 +1,15 @@
+## Nâng cấp AI giai đoạn 3 — hàng đợi bền vững, cache token, quản trị — 23/10/2026
+
+**Trạng thái: Đã triển khai trên nhánh `feat/ai-phase3` (chưa merge/push).**
+
+- Hàng đợi bền vững (migration 0008): prompt lần gọi đầu lưu trên `ai_requests`; worker mỗi instance nhận việc bằng `FOR UPDATE SKIP LOCKED` dưới khóa bảng nên `AI_MAX_CONCURRENT` là toàn hệ thống. Lượt vượt giới hạn xếp hàng (`AI_MAX_QUEUED`) thay vì báo 429; chat hiện vị trí. Lượt chờ sống qua restart, chờ >10 phút thì lỗi; lượt đang chạy mất lease vẫn interrupted, không tự chạy lại. Prompt bị xóa khi lượt kết thúc.
+- Cache token: đọc `prompt_tokens_details.cached_tokens` (OpenAI) hoặc `prompt_cache_hit_tokens`/`cache_read_input_tokens`, lưu `ai_usage.cached_input_tokens`, hiển thị ở từng câu trả lời và thống kê. Thứ tự prompt hiện có đã giữ tiền tố ổn định trong một hội thoại.
+- Quản trị: `GET /ai/admin/usage` + khối trong Cài đặt AI cho `ADMIN_USER_IDS` hoặc `ADMIN_EMAILS` (chỉ email đã xác minh, chống chiếm email). Chỉ số liệu tổng hợp.
+- Kiểm thử: 100 test; QA research-preview: 3 lượt cùng lúc → lượt 3 “queued · vị trí 1” rồi hoàn tất; khối quản trị hiển thị đúng. Một lần chạy cả bộ, test xuất XLSX/DOCX của backend trả 503 rồi qua ở 3 lần chạy sau — nghi carbone chậm khi các file test chạy song song, chưa xác định nguyên nhân.
+- Chưa làm: đọc ảnh phổ (vision) — cần chọn nguồn ảnh (mirror plot GNPS2 hay ảnh cấu trúc) và model có vision; adapter native Anthropic/OpenAI Responses — MộtAPI là OpenAI-compatible nên chưa cần.
+
+---
+
 ## Nâng cấp AI giai đoạn 2 — 23/10/2026
 
 **Trạng thái: Đã triển khai lần lượt theo yêu cầu “thực hiện lần lượt”, trên nhánh `feat/ai-phase2` (chưa merge/push).**

@@ -68,6 +68,8 @@ const config = readConfig({
   SESSION_SECRET: "local-qa-only-secret-32-characters-long",
   AI_ENCRYPTION_KEY: "ef".repeat(32),
   AI_ALLOWED_HOSTS: "example.com",
+  // The QA account below is verified, so it also sees the admin panel.
+  ADMIN_EMAILS: "research-qa@example.test",
 });
 const app = createApp(
   config,
@@ -163,7 +165,7 @@ const app = createApp(
 );
 const user = randomUUID();
 await db.query(
-  "INSERT INTO users(id,email,display_name,password_hash) VALUES($1,$2,$3,$4)",
+  "INSERT INTO users(id,email,display_name,password_hash,email_verified_at) VALUES($1,$2,$3,$4,now())",
   [
     user,
     "research-qa@example.test",

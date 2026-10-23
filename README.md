@@ -40,7 +40,7 @@ Mỗi provider có hạn mức token theo tài khoản provider (mặc định g
 
 **Kết quả và thảo luận**: “Dùng làm nháp thảo luận” lưu câu trả lời (trích dẫn đã đổi sang tên báo cáo/dòng) thành nháp gắn với báo cáo; sửa ở mục nháp; xuất Word sẽ thêm mục “KẾT QUẢ VÀ THẢO LUẬN” cuối tài liệu. “Bỏ khỏi Word” để xóa.
 
-**Thống kê sử dụng 30 ngày** nằm trong Cài đặt AI (chỉ tài khoản của bạn). **Đánh giá chất lượng**: `npx tsx scripts/ai-eval.ts` chạy 5 câu hỏi cố định trên báo cáo mẫu bằng provider thật (đặt `AI_EVAL_BASE_URL`, `AI_EVAL_API_KEY`, `AI_EVAL_MODEL`, tùy chọn `AI_EVAL_TOOLS`/`AI_EVAL_STREAM`; tốn token), ghi kết quả vào `qa/ai-eval/`; `--mock` chỉ kiểm tra bộ chạy.
+**Thống kê sử dụng 30 ngày** nằm trong Cài đặt AI (chỉ tài khoản của bạn), kèm số token vào provider báo là lấy từ cache. Quản trị viên (`ADMIN_USER_IDS`, hoặc `ADMIN_EMAILS` với email đã xác minh qua Google) thấy thêm khối **Quản trị · AI toàn hệ thống**: hàng đợi, usage theo tài khoản/model và lỗi gần đây; không bao giờ có nội dung chat. **Đánh giá chất lượng**: `npx tsx scripts/ai-eval.ts` chạy 5 câu hỏi cố định trên báo cáo mẫu bằng provider thật (đặt `AI_EVAL_BASE_URL`, `AI_EVAL_API_KEY`, `AI_EVAL_MODEL`, tùy chọn `AI_EVAL_TOOLS`/`AI_EVAL_STREAM`; tốn token), ghi kết quả vào `qa/ai-eval/`; `--mock` chỉ kiểm tra bộ chạy.
 
 - Project, phiên, hội thoại, tin nhắn, nguồn/revision, request state và usage được lưu PostgreSQL. Phiên nghiên cứu độc lập với cookie đăng nhập.
 - Đổi model chỉ ảnh hưởng lượt tiếp theo. Thứ tự ưu tiên: lượt chat → phiên → project → tài khoản. Giao diện hiển thị provider/model hiệu lực; không tự chuyển provider khi lỗi.
@@ -51,7 +51,7 @@ Mỗi provider có hạn mức token theo tài khoản provider (mặc định g
 
 ### Cấu hình máy chủ AI
 
-Chạy `npm run db:migrate` để áp dụng `0002_research_ai.sql` đến `0007_ai_report_drafts.sql` (chỉ thêm bảng/cột/ràng buộc; không chuyển hoặc xóa báo cáo cũ). Khai báo các biến trong `.env.example`:
+Chạy `npm run db:migrate` để áp dụng `0002_research_ai.sql` đến `0008_ai_request_queue.sql` (chỉ thêm bảng/cột/ràng buộc; không chuyển hoặc xóa báo cáo cũ). Khai báo các biến trong `.env.example`:
 
 ```text
 AI_ENCRYPTION_KEY=<64 ký tự hex ngẫu nhiên, tương đương 32 byte>
@@ -70,7 +70,7 @@ Tạo khóa bằng `node -e "console.log(require('crypto').randomBytes(32).toStr
 
 Hạn mức token là dự toán bảo thủ theo ngân sách context và số vòng tools; không hoàn trả dự toán khi lỗi/dừng. Usage thật chỉ hiển thị khi provider cung cấp, còn thiếu ghi không xác định. Chat thử cũng dùng hạn mức. Có thể nhập đơn giá input/output trên 1 triệu token tại từng model. Mỗi lượt lưu phiên bản đơn giá và chi phí ước tính; thiếu đơn giá hoặc usage thì để không xác định. Không tự đổi tiền tệ, không tính riêng cache/reasoning/phụ phí; đối chiếu hóa đơn thực tại provider. Dung lượng giới hạn gồm snapshot, tin nhắn và kết quả tools; có thể xóa hội thoại cũ để giải phóng.
 
-Backend chạy lượt AI trong process với lease/heartbeat DB. Khi restart, lượt hết lease chuyển sang interrupted ở lần truy cập API AI tiếp theo; người dùng tự thử lại. Không có worker bền vững hoặc tự resume qua restart. SSE gửi trạng thái/nội dung đã lưu từng đợt; client tự dùng polling khi SSE lỗi. Khi deploy, cấu hình cookie/origin như xác thực hiện có và kiểm tra proxy SSE không buffering, timeout và cancel trên môi trường thật.
+Lượt AI nằm trong hàng đợi trong DB: prompt lần gọi đầu được lưu cùng request, mỗi instance có worker nhận việc (`SKIP LOCKED`) mỗi 2 giây và ngay sau khi gửi/xong, nên `AI_MAX_CONCURRENT` là giới hạn toàn hệ thống và lượt vượt giới hạn sẽ xếp hàng (`AI_MAX_QUEUED`, mặc định 20; chat hiện vị trí). Lượt đang chờ không mất khi restart; chờ quá 10 phút thì báo lỗi. Lượt đang chạy mà mất heartbeat chuyển sang interrupted và không tự chạy lại (provider có thể đã tính phí); người dùng tự thử lại. Prompt lưu tạm được xóa khi lượt kết thúc. SSE gửi trạng thái/nội dung đã lưu từng đợt; client tự dùng polling khi SSE lỗi. Khi deploy, cấu hình cookie/origin như xác thực hiện có và kiểm tra proxy SSE không buffering, timeout và cancel trên môi trường thật.
 
 ### Kiểm tra riêng bằng dữ liệu mẫu
 

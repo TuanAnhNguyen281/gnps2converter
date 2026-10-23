@@ -17,6 +17,7 @@ const config = readConfig({
   AI_ALLOWED_HOSTS: "example.com",
   // finish() polls request state; the default per-minute limit is for real clients.
   API_RATE_LIMIT: "10000",
+  ADMIN_EMAILS: "ai-a@example.com",
 });
 let sql: PGlite,
   db: Database,
@@ -1080,6 +1081,21 @@ describe("Research project, provider and persistent chat", () => {
     expect(
       (await a.get(`/api/ai/reports/${reportId}/discussion`)).body,
     ).toBeNull();
+  });
+  it("shows system-wide aggregates only to a verified admin", async () => {
+    // Listed email but registered with a password: not verified, not admin.
+    expect((await a.get("/api/ai/admin/usage")).status).toBe(403);
+    await db.query("UPDATE users SET email_verified_at=now() WHERE id=$1", [
+      userA,
+    ]);
+    const r = await a.get("/api/ai/admin/usage?days=7");
+    expect(r.status).toBe(200);
+    expect(r.body.accounts[0]).toMatchObject({ email: "ai-a@example.com" });
+    expect(r.body.accounts[0].requests).toBeGreaterThan(0);
+    expect(r.body.models.length).toBeGreaterThan(0);
+    expect(r.body.queue).toMatchObject({ queued: 0, maxConcurrent: 2 });
+    expect(JSON.stringify(r.body)).not.toContain("Có 1 hợp chất");
+    expect((await b.get("/api/ai/admin/usage")).status).toBe(403);
   });
   it("summarizes own usage by day and model", async () => {
     const mine = (await a.get("/api/ai/usage/summary?days=7")).body;

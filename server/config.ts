@@ -36,6 +36,16 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env) {
     aiDailyTokens: integer("AI_DAILY_TOKEN_BUDGET", 500000),
     aiMaxConcurrent: integer("AI_MAX_CONCURRENT", 2, 10),
     aiMaxQueued: integer("AI_MAX_QUEUED", 20, 1000),
+    // Admins see aggregate AI usage of all accounts (never chat content).
+    // Emails only count once verified (Google sign-in), so they cannot be squatted.
+    adminUserIds: (env.ADMIN_USER_IDS ?? "")
+      .split(",")
+      .map((x) => x.trim().toLowerCase())
+      .filter(Boolean),
+    adminEmails: (env.ADMIN_EMAILS ?? "")
+      .split(",")
+      .map((x) => x.trim().toLowerCase())
+      .filter(Boolean),
     aiMaxStorageBytes: integer("AI_MAX_STORAGE_BYTES", 50000000),
     aiTimeoutMs: integer("AI_TIMEOUT_MS", 90000, 180000),
     googleId: env.GOOGLE_CLIENT_ID ?? "",
