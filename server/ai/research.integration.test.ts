@@ -986,6 +986,16 @@ describe("Research project, provider and persistent chat", () => {
       (await a.get(`/api/ai/reports/${reportId}/discussion`)).body,
     ).toBeNull();
   });
+  it("summarizes own usage by day and model", async () => {
+    const mine = (await a.get("/api/ai/usage/summary?days=7")).body;
+    expect(mine.days).toBe(7);
+    expect(mine.byDay[0].requests).toBeGreaterThan(0);
+    const model = mine.byModel.find((m: any) => m.model_id === "test-model");
+    expect(model.requests).toBeGreaterThan(model.failed);
+    expect(model.input_tokens).toBeGreaterThan(0);
+    expect(model.actual_to_estimate).toBeGreaterThan(0);
+    expect((await b.get("/api/ai/usage/summary")).body.byModel).toEqual([]);
+  });
   it("serves the server-side review queue only to the report owner", async () => {
     const q = await a.get(`/api/ai/reports/${reportId}/review-queue?limit=5`);
     expect(q.status).toBe(200);

@@ -1015,6 +1015,51 @@ export function researchRouter(
       );
     }),
   );
+  // Per-user usage over recent days: by day and by provider/model, with the
+  // estimate-vs-provider input ratio that drives token calibration.
+  router.get(
+    "/ai/usage/summary",
+    route(async (req, res) => {
+      const user = owner(req),
+        days = z.coerce
+          .number()
+          .int()
+          .min(1)
+          .max(90)
+          .default(30)
+          .parse(req.query.days ?? undefined);
+      const since = `(date_trunc('day',now() AT TIME ZONE 'Asia/Ho_Chi_Minh') - make_interval(days => $2::int - 1)) AT TIME ZONE 'Asia/Ho_Chi_Minh'`;
+      const [byDay, byModel] = await Promise.all([
+        db.query(
+          `SELECT to_char(r.started_at AT TIME ZONE 'Asia/Ho_Chi_Minh','YYYY-MM-DD') AS day,count(*)::int AS requests,count(*) FILTER (WHERE r.state='failed')::int AS failed,coalesce(sum(u.input_tokens),0)::bigint AS input_tokens,coalesce(sum(u.output_tokens),0)::bigint AS output_tokens,count(*) FILTER (WHERE u.input_tokens IS NULL OR u.usage_source='estimated')::int AS estimated
+           FROM ai_requests r JOIN ai_usage u ON u.request_id=r.id WHERE r.owner_id=$1 AND r.started_at>=${since} GROUP BY 1 ORDER BY 1 DESC`,
+          [user, days],
+        ),
+        db.query(
+          `SELECT r.provider_name,r.model_id,count(*)::int AS requests,count(*) FILTER (WHERE r.state='failed')::int AS failed,count(*) FILTER (WHERE r.state='completed')::int AS completed,coalesce(sum(u.input_tokens),0)::bigint AS input_tokens,coalesce(sum(u.output_tokens),0)::bigint AS output_tokens,sum(u.estimated_cost) AS estimated_cost,max(u.currency) AS currency,
+             round((sum(u.input_tokens) FILTER (WHERE u.usage_source='provider' AND u.estimated_input_tokens>0))::numeric / nullif(sum(u.estimated_input_tokens) FILTER (WHERE u.usage_source='provider' AND u.estimated_input_tokens>0),0),2) AS actual_to_estimate
+           FROM ai_requests r JOIN ai_usage u ON u.request_id=r.id WHERE r.owner_id=$1 AND r.started_at>=${since} GROUP BY 1,2 ORDER BY requests DESC`,
+          [user, days],
+        ),
+      ]);
+      const num = (v: unknown) => (v === null ? null : Number(v));
+      res.json({
+        days,
+        byDay: byDay.rows.map((r) => ({
+          ...r,
+          input_tokens: Number(r.input_tokens),
+          output_tokens: Number(r.output_tokens),
+        })),
+        byModel: byModel.rows.map((r) => ({
+          ...r,
+          input_tokens: Number(r.input_tokens),
+          output_tokens: Number(r.output_tokens),
+          estimated_cost: num(r.estimated_cost),
+          actual_to_estimate: num(r.actual_to_estimate),
+        })),
+      });
+    }),
+  );
   router.get(
     "/ai/usage",
     route(async (req, res) => {

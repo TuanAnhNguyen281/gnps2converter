@@ -645,3 +645,25 @@
   display: block;
   color: var(--muted, #5b6b7f);
 }
+.usage-summary summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.usage-summary table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 10px 0;
+  font-size: 12px;
+}
+.usage-summary th,
+.usage-summary td {
+  border: 1px solid var(--line, #d9e3ee);
+  padding: 4px 8px;
+  text-align: left;
+  font-size: 12px;
+  text-transform: none;
+  letter-spacing: normal;
+}
+.usage-summary .md-table {
+  overflow-x: auto;
+}

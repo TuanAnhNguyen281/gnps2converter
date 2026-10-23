@@ -83,6 +83,105 @@ export function QuotaMeter({
     </div>
   );
 }
+interface UsageSummary {
+  days: number;
+  byDay: {
+    day: string;
+    requests: number;
+    failed: number;
+    input_tokens: number;
+    output_tokens: number;
+    estimated: number;
+  }[];
+  byModel: {
+    provider_name: string;
+    model_id: string;
+    requests: number;
+    completed: number;
+    failed: number;
+    input_tokens: number;
+    output_tokens: number;
+    estimated_cost: number | null;
+    currency: string | null;
+    actual_to_estimate: number | null;
+  }[];
+}
+// Own usage only: the app has no admin role, so nobody sees other accounts.
+function UsageTables({ summary }: { summary: UsageSummary }) {
+  if (!summary.byModel.length) return null;
+  return (
+    <details className="ai-card usage-summary">
+      <summary>Thống kê sử dụng {summary.days} ngày</summary>
+      <div className="md-table">
+        <table>
+          <thead>
+            <tr>
+              <th>Provider · model</th>
+              <th>Lượt</th>
+              <th>Lỗi</th>
+              <th>Token vào</th>
+              <th>Token ra</th>
+              <th>Thực tế/dự toán</th>
+              <th>Chi phí ước tính</th>
+            </tr>
+          </thead>
+          <tbody>
+            {summary.byModel.map((m) => (
+              <tr key={`${m.provider_name}|${m.model_id}`}>
+                <td>
+                  {m.provider_name} · {m.model_id}
+                </td>
+                <td>{m.requests}</td>
+                <td>{m.failed}</td>
+                <td>{fmt(m.input_tokens)}</td>
+                <td>{fmt(m.output_tokens)}</td>
+                <td>
+                  {m.actual_to_estimate === null
+                    ? "—"
+                    : `${m.actual_to_estimate}×`}
+                </td>
+                <td>
+                  {m.estimated_cost === null
+                    ? "—"
+                    : `${m.estimated_cost.toFixed(4)} ${m.currency ?? ""}`}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <table>
+          <thead>
+            <tr>
+              <th>Ngày</th>
+              <th>Lượt</th>
+              <th>Lỗi</th>
+              <th>Token vào</th>
+              <th>Token ra</th>
+              <th>Lượt ước tính</th>
+            </tr>
+          </thead>
+          <tbody>
+            {summary.byDay.slice(0, 14).map((d) => (
+              <tr key={d.day}>
+                <td>{d.day}</td>
+                <td>{d.requests}</td>
+                <td>{d.failed}</td>
+                <td>{fmt(d.input_tokens)}</td>
+                <td>{fmt(d.output_tokens)}</td>
+                <td>{d.estimated}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <small>
+        “Thực tế/dự toán” = token vào provider báo ÷ ước tính của ứng dụng; dùng
+        để hiệu chỉnh mức giữ chỗ. “Lượt ước tính” là lượt không có usage từ
+        provider (tính theo mức giữ chỗ hoặc ước tính).
+      </small>
+    </details>
+  );
+}
 const MOTAPI_PRESET = {
   name: "MộtAPI",
   url: "https://motapis.com/v1",
@@ -117,16 +216,19 @@ export function AiSettings() {
     [daily, setDaily] = useState(MOTAPI_PRESET.daily),
     [reserve, setReserve] = useState(MOTAPI_PRESET.reserve),
     [defaultModel, setDefaultModel] = useState(""),
-    [usage, setUsage] = useState<any>(null);
+    [usage, setUsage] = useState<any>(null),
+    [summary, setSummary] = useState<UsageSummary | null>(null);
   const confirm = useConfirm();
   async function refresh() {
-    const [p, s, u] = await Promise.all([
+    const [p, s, u, sum] = await Promise.all([
       jsonApi<Provider[]>("/api/ai/providers"),
       jsonApi<any[]>("/api/ai/settings"),
       jsonApi("/api/ai/usage"),
+      jsonApi<UsageSummary>("/api/ai/usage/summary?days=30"),
     ]);
     setProviders(p);
     setUsage(u);
+    setSummary(sum);
     const d = s.find((x) => x.scope === "account");
     setDefaultModel(d ? `${d.provider_id}|${d.model_id}` : "");
   }
@@ -352,6 +454,7 @@ export function AiSettings() {
           )}
         </section>
       </div>
+      {summary && <UsageTables summary={summary} />}
       {providers.map((p) => (
         <section key={p.id} className="ai-card">
           <div className="ai-card-heading">
