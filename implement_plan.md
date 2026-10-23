@@ -1,3 +1,24 @@
+## Nâng cấp AI giai đoạn 2 — 23/10/2026
+
+**Trạng thái: Đã triển khai lần lượt theo yêu cầu “thực hiện lần lượt”, trên nhánh `feat/ai-phase2` (chưa merge/push).**
+
+1. Commit phần trước: người dùng đã tự commit `1e396e9`. Thử MộtAPI thật cần API key của người dùng — chưa làm.
+2. Ước lượng token (`server/ai/tokens.ts`) + hiệu chỉnh EMA theo usage thật/model (migration 0006); giữ chỗ lần gọi đầu khi gửi, mỗi vòng tools tự giữ chỗ dưới khóa. Ví dụ preview: ~2,7k token thay vì ~16k–80k trước đây.
+3. `POST /ai/conversations/:id/preview` + UI dự toán dưới ô câu hỏi, khóa Gửi khi vượt context/hạn mức.
+4. Hạn mức: gộp theo HMAC của API key; Chat thử ghi vào `ai_provider_usage_events`; cờ `stream_options_rejected` lưu DB.
+5. Ngăn chat trên màn báo cáo (`.ai-launcher`/`.ai-drawer` có sẵn) + dòng “Sẽ gửi”; chọn dòng làm mới dự toán.
+6. Xuất chat đổi mã trích dẫn thành tên báo cáo · dòng TSV; gợi ý câu hỏi theo dữ liệu.
+7. `server/ai/review.ts`: điểm cần duyệt + 4 công cụ mới; endpoint và panel Hàng đợi duyệt; top 5 đưa vào context ban đầu.
+8. Kiểm chứng trích dẫn ⚠ (không tốn token) và Nhờ AI kiểm tra lại (gửi đúng các dòng).
+9. Nháp “Kết quả và thảo luận” (migration 0007) chèn vào Word sau render carbone.
+10. Thống kê sử dụng 30 ngày (chỉ tài khoản mình — chưa có vai trò quản trị); `scripts/ai-eval.ts` 5 ca kiểm tra grounding/injection.
+
+Kiểm thử: 97 test, typecheck/build đạt; QA trình duyệt research-preview desktop 1440 và mobile 375 cho dự toán, ngăn chat, hàng đợi duyệt, kiểm chứng, nháp thảo luận, thống kê. Chưa chạy `ai-eval` với provider thật; chưa mở file Word xuất ra bằng Word để xem định dạng (đã kiểm XML trong test).
+
+Chưa làm (cần quyết định riêng): hàng đợi bền vững/nhiều instance (lượt AI vẫn chạy trong process), trang quản trị xem usage mọi tài khoản (cần vai trò admin), đọc ảnh phổ (vision), adapter Anthropic/Responses có prompt caching.
+
+---
+
 ## Mở AI chat (bỏ gate Coming soon) — 22/10/2026
 
 **Trạng thái: Đã triển khai theo yêu cầu người dùng “bỏ coming soon”.**

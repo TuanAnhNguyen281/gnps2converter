@@ -194,6 +194,14 @@ const rows = ["A", "B", "C"].map((name, i) => ({
   id: `row-${name}`,
   compoundName: `Compound ${name}`,
   deltaPpm: [1, 5, 15][i],
+  sourceTsvRow: i + 2,
+  // Compound C (15 ppm, low MQScore, few peaks) lands in the review queue.
+  sourceMetadata: {
+    SpectrumID: `CCMSLIB0000${i + 1}`,
+    MQScore: [0.92, 0.85, 0.58][i],
+    SharedPeaks: [16, 12, 4][i],
+    ...(i < 2 ? { Smiles: "C1=CC=CC=C1" } : {}),
+  },
 }));
 const result = {
   source: "files",

@@ -32,6 +32,16 @@ Prompt dùng mã tham chiếu ngắn thay cho UUID: `R1` là báo cáo thứ nh�
 
 Mỗi provider có hạn mức token theo tài khoản provider (mặc định gói miễn phí MộtAPI chưa nạp: 2.000.000 token/tháng, trần 2.000.000/ngày) và phần trăm dự phòng (mặc định 10%); nút **Điền mẫu MộtAPI** điền sẵn tên, Base URL `https://motapis.com/v1` và hạn mức, người dùng tự nhập API key. Trước mỗi lượt, server cộng usage của provider trong tháng/ngày (giờ Việt Nam): lượt hoàn tất tính usage thật, lượt đang chạy hoặc không có usage tính mức giữ chỗ, lượt lỗi sau khi đã gọi provider tính ước tính, lượt lỗi trước khi gọi tính 0. Không đủ hạn mức khả dụng thì chặn và báo rõ; để trống hạn mức nghĩa là không chặn. **Chat thử** kiểm tra chat, stream (kèm usage, `stream_options`) và tools để quyết định bật Tools/Stream. Provider từ chối `stream_options` được gửi lại một lần không kèm và ghi nhớ trong process. Câu trả lời chạm giới hạn output được giữ, gắn nhãn bị cắt và có nút **Tiếp tục**.
 
+**Dự toán và giữ chỗ token.** Ứng dụng ước lượng token (chữ ASCII và chữ có dấu tính riêng) và tự hiệu chỉnh theo usage thật của từng model. Khi gửi chỉ giữ chỗ cho lần gọi đầu; mỗi vòng công cụ tự giữ chỗ trước khi gọi. Dưới ô câu hỏi hiện “Sẽ gửi: …” và dự toán token vào/ra/giữ chỗ cùng phần chi tiết; nút Gửi bị khóa nếu vượt context hoặc hạn mức. Provider dùng chung một API key (so bằng HMAC, không lưu key thô) dùng chung hạn mức; **Chat thử** cũng bị trừ vào hạn mức. `API_RATE_LIMIT` (mặc định 120) là số request /api mỗi phút.
+
+**Trên màn báo cáo** có nút **AI chat · Project** mở ngăn chat cạnh bảng; chọn dòng trên bảng là phạm vi gửi đổi theo. Ngăn chat có **Hàng đợi duyệt** (điểm 0–100 do server tính từ ppm, trạng thái, số ứng viên, MQScore, SharedPeaks, lệch RT, thiếu cấu trúc; không gọi AI) và gợi ý câu hỏi theo dữ liệu. Model có tools dùng thêm `get_review_queue`, `aggregate_report`, `distribution`, `find_duplicates`.
+
+**Trích dẫn ⚠**: “Kiểm chứng” hiện số liệu gốc từ snapshot (không gọi AI); “Nhờ AI kiểm tra lại” gửi lượt mới chỉ kèm đúng các dòng đó. File xuất Markdown/JSON đổi `[R1-12]` thành tên báo cáo · dòng TSV.
+
+**Kết quả và thảo luận**: “Dùng làm nháp thảo luận” lưu câu trả lời (trích dẫn đã đổi sang tên báo cáo/dòng) thành nháp gắn với báo cáo; sửa ở mục nháp; xuất Word sẽ thêm mục “KẾT QUẢ VÀ THẢO LUẬN” cuối tài liệu. “Bỏ khỏi Word” để xóa.
+
+**Thống kê sử dụng 30 ngày** nằm trong Cài đặt AI (chỉ tài khoản của bạn). **Đánh giá chất lượng**: `npx tsx scripts/ai-eval.ts` chạy 5 câu hỏi cố định trên báo cáo mẫu bằng provider thật (đặt `AI_EVAL_BASE_URL`, `AI_EVAL_API_KEY`, `AI_EVAL_MODEL`, tùy chọn `AI_EVAL_TOOLS`/`AI_EVAL_STREAM`; tốn token), ghi kết quả vào `qa/ai-eval/`; `--mock` chỉ kiểm tra bộ chạy.
+
 - Project, phiên, hội thoại, tin nhắn, nguồn/revision, request state và usage được lưu PostgreSQL. Phiên nghiên cứu độc lập với cookie đăng nhập.
 - Đổi model chỉ ảnh hưởng lượt tiếp theo. Thứ tự ưu tiên: lượt chat → phiên → project → tài khoản. Giao diện hiển thị provider/model hiệu lực; không tự chuyển provider khi lỗi.
 - Câu hỏi được lưu trước khi gọi provider; lỗi/dừng/gián đoạn vẫn giữ lịch sử. Gửi trùng dùng request ID và fingerprint; không tự gọi lại model khi SSE mất kết nối.
@@ -41,7 +51,7 @@ Mỗi provider có hạn mức token theo tài khoản provider (mặc định g
 
 ### Cấu hình máy chủ AI
 
-Chạy `npm run db:migrate` để áp dụng `0002_research_ai.sql` đến `0005_ai_quota_truncation.sql` (chỉ thêm bảng/cột/ràng buộc; không chuyển hoặc xóa báo cáo cũ). Khai báo các biến trong `.env.example`:
+Chạy `npm run db:migrate` để áp dụng `0002_research_ai.sql` đến `0007_ai_report_drafts.sql` (chỉ thêm bảng/cột/ràng buộc; không chuyển hoặc xóa báo cáo cũ). Khai báo các biến trong `.env.example`:
 
 ```text
 AI_ENCRYPTION_KEY=<64 ký tự hex ngẫu nhiên, tương đương 32 byte>
