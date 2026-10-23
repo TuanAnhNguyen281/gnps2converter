@@ -1,6 +1,14 @@
 import { z } from "zod";
 import type { Connection, Database } from "../db/index.js";
 import { ApiError } from "../errors.js";
+import { gnpsTask } from "./spectrum.js";
+import {
+  REVIEW_RULE,
+  metaText,
+  ppmOf,
+  reviewRow,
+  type ReviewParameters,
+} from "./review.js";
 
 export const contextSchema = z.object({
   viewState: z
@@ -17,6 +25,8 @@ export const contextSchema = z.object({
 export type ContextSelection = z.infer<typeof contextSchema>;
 export interface ContextReport {
   id: string;
+  // GNPS2 task id when the report was imported from a task (for mirror plots).
+  task?: string | null;
   title: string;
   revision: number;
   sourceUrl: string | null;
@@ -30,7 +40,13 @@ export interface ResearchContext {
     historyOmitted: number;
     summaryVersion: number;
   };
-  project: { id: string; name: string; research_goal: string };
+  project: {
+    id: string;
+    name: string;
+    research_goal: string;
+    // Opt-in for lookup_compound, which sends InChIKey/SMILES to PubChem/NPClassifier.
+    allow_external_lookup?: boolean;
+  };
   session: { id: string; title: string };
   selection: ContextSelection;
   reports: ContextReport[];
@@ -67,7 +83,7 @@ export async function buildContext(
 ): Promise<ResearchContext> {
   const session = (
     await db.query(
-      `SELECT s.id,s.title,s.project_id,s.active_report_id,p.name,p.research_goal FROM research_sessions s JOIN projects p ON p.id=s.project_id AND p.owner_id=s.owner_id WHERE s.id=$1 AND s.owner_id=$2 AND p.archived_at IS NULL AND s.status='active'`,
+      `SELECT s.id,s.title,s.project_id,s.active_report_id,p.name,p.research_goal,p.allow_external_lookup FROM research_sessions s JOIN projects p ON p.id=s.project_id AND p.owner_id=s.owner_id WHERE s.id=$1 AND s.owner_id=$2 AND p.archived_at IS NULL AND s.status='active'`,
       [sessionId, owner],
     )
   ).rows[0];
@@ -103,6 +119,7 @@ export async function buildContext(
       );
   const reports: ContextReport[] = records.map((r) => ({
     id: r.id,
+    task: gnpsTask(r.data, r.source_url),
     title: r.title,
     revision: r.revision,
     sourceUrl: r.source_url,
@@ -120,6 +137,7 @@ export async function buildContext(
       id: session.project_id,
       name: session.name,
       research_goal: session.research_goal,
+      allow_external_lookup: !!session.allow_external_lookup,
     },
     session: { id: session.id, title: session.title },
     selection,
@@ -296,6 +314,20 @@ export function initialContext(ctx: ResearchContext, byteBudget: number) {
     size += rowSize;
   }
   payload.returnedRows = payload.rows.length;
+  payload.reviewQueue = ctx.reports.flatMap((r, reportIndex) =>
+    r.rows
+      .map((row, i) => ({ i, review: reviewRow(row, r.parameters as any) }))
+      .filter((x) => x.review.score >= 30)
+      .sort((a, b) => b.review.score - a.review.score || a.i - b.i)
+      .slice(0, 5)
+      .map(({ i, review }) => ({
+        reportId: r.id,
+        id: r.rows[i].id,
+        ref: rowRef(reportIndex, i),
+        compoundName: r.rows[i].compoundName,
+        ...review,
+      })),
+  );
   return payload;
 }
 const reportArg = {
@@ -399,6 +431,111 @@ const toolDefs = {
       .object({ reportId: refArg, otherReportId: refArg, ...page })
       .strict(),
   },
+  get_review_queue: {
+    description:
+      "Rows ranked by a server-computed review score (0-100) with the reasons (ppm over tolerance, ambiguous/unmatched, several candidates, low MQScore, few SharedPeaks, RT offset, missing structure). Use for 'which rows should be checked first'. Explain the reasons; do not change the scores.",
+    properties: {
+      reportId: reportArg,
+      minScore: {
+        type: "integer",
+        minimum: 0,
+        maximum: 100,
+        description: "Default 30.",
+      },
+      ...pageArgs,
+    },
+    required: ["reportId"],
+    schema: z
+      .object({
+        reportId: refArg,
+        minScore: z.number().int().min(0).max(100).default(30),
+        ...page,
+      })
+      .strict(),
+  },
+  aggregate_report: {
+    description:
+      "Group ALL rows of one report and return per-group counts and |ppm| mean/max, largest groups first, with a few example row refs.",
+    properties: {
+      reportId: reportArg,
+      groupBy: {
+        type: "string",
+        enum: [
+          "status",
+          "adduct",
+          "molecularFormula",
+          "superclass",
+          "pathway",
+          "libraryClass",
+        ],
+      },
+    },
+    required: ["reportId", "groupBy"],
+    schema: z
+      .object({
+        reportId: refArg,
+        groupBy: z.enum([
+          "status",
+          "adduct",
+          "molecularFormula",
+          "superclass",
+          "pathway",
+          "libraryClass",
+        ]),
+      })
+      .strict(),
+  },
+  distribution: {
+    description:
+      "Statistics and histogram of a numeric field over ALL rows of one report: ppm error, retention time (rt) or RT offset (deltaRt).",
+    properties: {
+      reportId: reportArg,
+      field: { type: "string", enum: ["ppm", "rt", "deltaRt"] },
+      bins: {
+        type: "integer",
+        minimum: 3,
+        maximum: 20,
+        description: "Default 8.",
+      },
+    },
+    required: ["reportId", "field"],
+    schema: z
+      .object({
+        reportId: refArg,
+        field: z.enum(["ppm", "rt", "deltaRt"]),
+        bins: z.number().int().min(3).max(20).default(8),
+      })
+      .strict(),
+  },
+  lookup_compound: {
+    description:
+      "External reference data for one row: PubChem (by the library InChIKey) and NPClassifier pathway/superclass/class (by SMILES). Only available when the project allows external lookup. This describes the library structure, not proof that it is in the sample.",
+    properties: {
+      rowId: {
+        type: "string",
+        description: "Row ref from context, e.g. R1-12.",
+      },
+    },
+    required: ["rowId"],
+    schema: z.object({ rowId: refArg, reportId: refArg.optional() }).strict(),
+  },
+  find_duplicates: {
+    description:
+      "Groups of rows in one report sharing the same compound name, library SpectrumID or molecular formula.",
+    properties: {
+      reportId: reportArg,
+      by: { type: "string", enum: ["name", "spectrumId", "formula"] },
+      ...pageArgs,
+    },
+    required: ["reportId", "by"],
+    schema: z
+      .object({
+        reportId: refArg,
+        by: z.enum(["name", "spectrumId", "formula"]),
+        ...page,
+      })
+      .strict(),
+  },
 };
 type ToolName = keyof typeof toolDefs;
 export const toolNames = Object.keys(toolDefs) as ToolName[];
@@ -415,10 +552,62 @@ export const tools = toolNames.map((name) => ({
     },
   },
 }));
-const ppmOf = (row: Record<string, any>) => {
-  const v = row.reportedMzErrorPpm ?? row.deltaPpm;
-  return typeof v === "number" && Number.isFinite(v) ? v : null;
-};
+// Row by ref (R1-12), or by reportId + row UUID for older callers.
+function resolveRow(
+  ctx: ResearchContext,
+  args: { rowId: string; reportId?: string },
+) {
+  let hit = resolveRef(ctx, args.rowId);
+  if (!hit?.row) {
+    const reportIndex = findReport(ctx, args.reportId),
+      rowIndex =
+        reportIndex >= 0
+          ? ctx.reports[reportIndex].rows.findIndex((r) => r.id === args.rowId)
+          : -1;
+    hit =
+      rowIndex >= 0
+        ? {
+            reportIndex,
+            report: ctx.reports[reportIndex],
+            rowIndex,
+            row: ctx.reports[reportIndex].rows[rowIndex],
+          }
+        : null;
+  }
+  if (!hit?.row)
+    throw new ApiError(404, "Công cụ chỉ đọc dòng trong snapshot đã chọn.");
+  return hit as NonNullable<typeof hit> & { row: Record<string, any> };
+}
+// Tools offered to the model for this context; external lookup is opt-in.
+export function toolsFor(ctx: ResearchContext) {
+  return ctx.project.allow_external_lookup
+    ? tools
+    : tools.filter((t) => t.function.name !== "lookup_compound");
+}
+// Validates lookup_compound arguments and returns the row it refers to.
+export function lookupTarget(ctx: ResearchContext, raw: unknown) {
+  if (!ctx.project.allow_external_lookup)
+    throw new ApiError(
+      403,
+      "Project chưa cho phép tra cứu bên ngoài.",
+      "AI_LOOKUP_DISABLED",
+    );
+  const args = toolDefs.lookup_compound.schema.parse(
+    raw && typeof raw === "object" && !Array.isArray(raw)
+      ? Object.fromEntries(Object.entries(raw).filter(([, v]) => v !== null))
+      : raw,
+  );
+  const hit = resolveRow(ctx, args);
+  return {
+    row: hit.row,
+    shown: {
+      reportId: hit.report.id,
+      id: hit.row.id,
+      ref: rowRef(hit.reportIndex, hit.rowIndex),
+      compoundName: hit.row.compoundName,
+    },
+  };
+}
 export function runTool(ctx: ResearchContext, name: string, raw: unknown) {
   if (!Object.hasOwn(toolDefs, name))
     throw new ApiError(400, "Công cụ không được phép.");
@@ -445,28 +634,10 @@ export function runTool(ctx: ResearchContext, name: string, raw: unknown) {
       revision: r.revision,
       rowCount: r.rows.length,
     }));
+  if (name === "lookup_compound")
+    throw new ApiError(400, "Tra cứu ngoài chạy bất đồng bộ qua lookupTarget.");
   if (name === "get_compound_details") {
-    let hit = resolveRef(ctx, args.rowId);
-    if (!hit?.row) {
-      const reportIndex = findReport(ctx, args.reportId),
-        rowIndex =
-          reportIndex >= 0
-            ? ctx.reports[reportIndex].rows.findIndex(
-                (r) => r.id === args.rowId,
-              )
-            : -1;
-      hit =
-        rowIndex >= 0
-          ? {
-              reportIndex,
-              report: ctx.reports[reportIndex],
-              rowIndex,
-              row: ctx.reports[reportIndex].rows[rowIndex],
-            }
-          : null;
-    }
-    if (!hit?.row)
-      throw new ApiError(404, "Công cụ chỉ đọc dòng trong snapshot đã chọn.");
+    const hit = resolveRow(ctx, args as { rowId: string; reportId?: string });
     return {
       reportId: hit.report.id,
       revision: hit.report.revision,
@@ -478,6 +649,153 @@ export function runTool(ctx: ResearchContext, name: string, raw: unknown) {
   if (!report)
     throw new ApiError(404, "Công cụ chỉ đọc báo cáo trong snapshot đã chọn.");
   if (name === "get_report_summary") return summarize(report);
+  const params = (report.parameters ?? {}) as ReviewParameters,
+    sample = (indexes: number[]) =>
+      indexes.slice(0, 5).map((i) => ({
+        reportId: report.id,
+        id: report.rows[i].id,
+        ref: rowRef(reportIndex, i),
+      }));
+  if (name === "get_review_queue") {
+    const ranked = report.rows
+      .map((row, i) => ({ i, review: reviewRow(row, params) }))
+      .filter((x) => x.review.score >= args.minScore)
+      .sort((a, b) => b.review.score - a.review.score || a.i - b.i);
+    return {
+      reportId: report.id,
+      revision: report.revision,
+      examinedRows: report.rows.length,
+      flaggedRows: ranked.length,
+      rule: REVIEW_RULE,
+      offset: args.offset,
+      rows: ranked
+        .slice(args.offset, args.offset + args.limit)
+        .map(({ i, review }) => ({
+          ...promptRow(ctx, reportIndex, i),
+          review,
+        })),
+      truncated: ranked.length > args.offset + args.limit,
+    };
+  }
+  if (name === "aggregate_report") {
+    const keyOf = (row: Record<string, any>) =>
+      String(
+        (args.groupBy === "superclass"
+          ? metaText(row, "npclassifier_superclass", "superclass")
+          : args.groupBy === "pathway"
+            ? metaText(row, "npclassifier_pathway")
+            : args.groupBy === "libraryClass"
+              ? metaText(row, "Library_Class", "libraryclass")
+              : row[args.groupBy]) ?? "",
+      ).trim() || "(trống)";
+    const groups = new Map<string, number[]>();
+    report.rows.forEach((row, i) =>
+      groups.set(keyOf(row), [...(groups.get(keyOf(row)) ?? []), i]),
+    );
+    const items = [...groups.entries()]
+      .sort((a, b) => b[1].length - a[1].length)
+      .map(([key, idx]) => {
+        const ppm = idx
+          .map((i) => ppmOf(report.rows[i]))
+          .filter((v): v is number => v !== null)
+          .map(Math.abs);
+        return {
+          key,
+          count: idx.length,
+          ppmMeanAbs: ppm.length
+            ? Number((ppm.reduce((a, b) => a + b, 0) / ppm.length).toFixed(2))
+            : null,
+          ppmMaxAbs: ppm.length ? Math.max(...ppm) : null,
+          examples: sample(idx),
+        };
+      });
+    return {
+      reportId: report.id,
+      revision: report.revision,
+      examinedRows: report.rows.length,
+      groupBy: args.groupBy,
+      groupCount: items.length,
+      groups: items.slice(0, 30),
+      truncated: items.length > 30,
+    };
+  }
+  if (name === "distribution") {
+    const valueOf = (row: Record<string, any>) => {
+      const raw =
+        args.field === "ppm"
+          ? ppmOf(row)
+          : args.field === "rt"
+            ? (row.rtData ?? row.rtTsv)
+            : row.deltaRt;
+      // Missing values are reported as missing, never as 0.
+      if (raw === null || raw === undefined || raw === "") return null;
+      const v = Number(raw);
+      return Number.isFinite(v) ? v : null;
+    };
+    const values = report.rows
+      .map(valueOf)
+      .filter((v): v is number => v !== null)
+      .sort((a, b) => a - b);
+    const min = values[0],
+      max = values[values.length - 1],
+      width = values.length ? (max - min) / args.bins || 1 : 1;
+    const bins = Array.from(
+      { length: values.length ? args.bins : 0 },
+      (_, k) => ({
+        from: Number((min + k * width).toFixed(4)),
+        to: Number((min + (k + 1) * width).toFixed(4)),
+        count: 0,
+      }),
+    );
+    for (const v of values)
+      bins[Math.min(args.bins - 1, Math.floor((v - min) / width))].count++;
+    return {
+      reportId: report.id,
+      revision: report.revision,
+      field: args.field,
+      examinedRows: report.rows.length,
+      count: values.length,
+      missing: report.rows.length - values.length,
+      min: values.length ? min : null,
+      max: values.length ? max : null,
+      mean: values.length
+        ? Number((values.reduce((a, b) => a + b, 0) / values.length).toFixed(4))
+        : null,
+      median: values.length ? values[Math.floor(values.length / 2)] : null,
+      bins,
+    };
+  }
+  if (name === "find_duplicates") {
+    const keyOf = (row: Record<string, any>) =>
+      (args.by === "name"
+        ? String(row.compoundName ?? "")
+        : args.by === "formula"
+          ? String(row.molecularFormula ?? "")
+          : (metaText(row, "SpectrumID", "spectrum_id") ?? "")
+      )
+        .trim()
+        .toLowerCase();
+    const groups = new Map<string, number[]>();
+    report.rows.forEach((row, i) => {
+      const k = keyOf(row);
+      if (k) groups.set(k, [...(groups.get(k) ?? []), i]);
+    });
+    const dupes = [...groups.entries()]
+      .filter(([, idx]) => idx.length > 1)
+      .sort((a, b) => b[1].length - a[1].length);
+    return {
+      reportId: report.id,
+      revision: report.revision,
+      examinedRows: report.rows.length,
+      by: args.by,
+      duplicateGroups: dupes.length,
+      offset: args.offset,
+      groups: dupes
+        .slice(args.offset, args.offset + args.limit)
+        .map(([key, idx]) => ({ key, count: idx.length, rows: sample(idx) })),
+      truncated: dupes.length > args.offset + args.limit,
+    };
+  }
   if (name === "compare_reports") {
     const otherIndex = findReport(ctx, args.otherReportId),
       other = ctx.reports[otherIndex];
@@ -653,4 +971,113 @@ export function remapCitations(
       ? `[${refs.join(", ")}]`
       : "[nguồn ngoài phạm vi hiện tại]";
   });
+}
+interface ReadableReport {
+  id: string;
+  title: string;
+  rows: Record<string, any>[];
+}
+// For exports read outside the app: [R1-12] -> [Report title · dòng TSV 12 (compound)].
+export function readableCitations(
+  content: string,
+  citations: Citation[] | null | undefined,
+  reports: ReadableReport[],
+) {
+  if (!citations?.length) return content;
+  const byRef = new Map(citations.map((c) => [c.ref, c]));
+  return content.replace(citationPattern, (_match, group: string) => {
+    const parts = splitRefs(group).map((ref) => {
+      const c = byRef.get(ref),
+        report = c?.reportId
+          ? reports.find((r) => r.id === c.reportId)
+          : undefined;
+      if (!c || !report) return `${ref} (không tồn tại)`;
+      if (!c.rowId) return report.title;
+      const row = report.rows.find((r) => r.id === c.rowId);
+      return `${report.title} · ${row?.sourceTsvRow ? `dòng TSV ${row.sourceTsvRow}` : `dòng ${ref}`}${row?.compoundName ? ` (${row.compoundName})` : ""}`;
+    });
+    return `[${parts.join("; ")}]`;
+  });
+}
+// Starter questions derived from the rows in scope, so they point at real issues.
+export function suggestQuestions(ctx: ResearchContext) {
+  const selected = ctx.selection.selectedRowIds,
+    inScope = ctx.reports.flatMap((r) =>
+      ctx.selection.scope === "selection" && selected.length
+        ? r.rows.filter((row) => selected.includes(row.id))
+        : r.rows,
+    ),
+    out: string[] = [];
+  if (
+    ctx.selection.scope === "selection" &&
+    selected.length === 1 &&
+    inScope[0]
+  )
+    out.push(
+      `Đánh giá độ tin cậy định danh của ${inScope[0].compoundName ?? "dòng đang chọn"}`,
+    );
+  const highPpm = inScope.filter((r) => {
+    const v = ppmOf(r);
+    return v !== null && Math.abs(v) > 10;
+  }).length;
+  if (highPpm) out.push(`Vì sao ${highPpm} dòng có sai số trên 10 ppm?`);
+  const ambiguous = inScope.filter((r) => r.status === "ambiguous").length;
+  if (ambiguous)
+    out.push(`Giải thích ${ambiguous} dòng ambiguous và cách xác minh`);
+  const unmatched = inScope.filter((r) => r.status === "unmatched").length;
+  if (unmatched) out.push(`${unmatched} dòng chưa khớp: nên kiểm tra gì?`);
+  if (ctx.reports.length >= 2)
+    out.push(`So sánh ${ctx.reports[0].title} và ${ctx.reports[1].title}`);
+  out.push(
+    "Dòng nào nên duyệt lại trước?",
+    "Soạn nháp mục Kết quả và thảo luận cho báo cáo",
+  );
+  return [...new Set(out)].slice(0, 4);
+}
+// One owned report with normalized rows, outside any research session.
+export async function loadReport(
+  db: Pick<Database | Connection, "query">,
+  owner: string,
+  reportId: string,
+): Promise<ContextReport> {
+  const r = (
+    await db.query(
+      `SELECT r.id,r.title,r.revision,r.source_url,r.data,COALESCE((SELECT jsonb_agg(rr.payload || jsonb_build_object('id',rr.source_row_id,'compoundName',rr.compound_name,'status',rr.status,'selected',rr.selected) ORDER BY rr.position) FROM report_rows rr WHERE rr.report_id=r.id),'[]'::jsonb) AS rows FROM reports r WHERE r.owner_id=$1 AND r.id=$2`,
+      [owner, reportId],
+    )
+  ).rows[0];
+  if (!r) throw new ApiError(404, "Không tìm thấy báo cáo.");
+  return {
+    id: r.id,
+    task: gnpsTask(r.data, r.source_url),
+    title: r.title,
+    revision: r.revision,
+    sourceUrl: r.source_url,
+    parameters: r.data.parameters,
+    rows: r.rows.map(normalizeRow),
+  };
+}
+export function reviewQueue(report: ContextReport, limit = 10, minScore = 30) {
+  const ranked = report.rows
+    .map((row, i) => ({
+      i,
+      row,
+      review: reviewRow(row, (report.parameters ?? {}) as ReviewParameters),
+    }))
+    .filter((x) => x.review.score >= minScore)
+    .sort((a, b) => b.review.score - a.review.score || a.i - b.i);
+  return {
+    reportId: report.id,
+    revision: report.revision,
+    examinedRows: report.rows.length,
+    flaggedRows: ranked.length,
+    rule: REVIEW_RULE,
+    items: ranked.slice(0, limit).map(({ row, review }) => ({
+      rowId: row.id,
+      compoundName: row.compoundName,
+      sourceTsvRow: row.sourceTsvRow,
+      status: row.status,
+      ...review,
+    })),
+  };
 }

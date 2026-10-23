@@ -7,9 +7,17 @@ export interface ProbeResult {
   streamOptions: "accepted" | "rejected" | null;
   streamUsage: boolean | null;
   tools: "ok" | "failed";
+  vision: "ok" | "failed";
   usage: boolean;
+  // Provider usage where reported, otherwise prompt + max_tokens per call.
+  tokens: number;
   notes: string[];
 }
+const spentOn = (u: any, fallback: number) =>
+  typeof u?.prompt_tokens === "number" &&
+  typeof u?.completion_tokens === "number"
+    ? u.prompt_tokens + u.completion_tokens
+    : fallback;
 const message = (e: unknown) =>
   e instanceof Error ? e.message : "Lỗi không xác định.";
 // Checks what a model really supports so Tools/Stream are enabled from evidence, not catalog claims.
@@ -33,6 +41,7 @@ export async function probeModel(
     typeof plain.usage?.prompt_tokens === "number" &&
     typeof plain.usage?.completion_tokens === "number";
   if (!usage) notes.push("Provider không trả usage cho lượt thường.");
+  let tokens = spentOn(plain.usage, 52);
 
   let stream: ProbeResult["stream"] = "failed",
     streamOptions: ProbeResult["streamOptions"] = null,
@@ -63,6 +72,7 @@ export async function probeModel(
     }
     const r = await streamCompletion(response, async () => {});
     stream = "ok";
+    tokens += spentOn(r.usage, 52);
     streamUsage =
       typeof r.usage?.prompt_tokens === "number" &&
       typeof r.usage?.completion_tokens === "number";
@@ -71,6 +81,8 @@ export async function probeModel(
         "Stream không trả usage; token các lượt stream sẽ là ước tính.",
       );
   } catch (e) {
+    // The call may still have been billed; count it conservatively.
+    tokens += 52;
     notes.push(`Stream lỗi: ${message(e)}`);
   }
 
@@ -99,19 +111,52 @@ export async function probeModel(
         tool_choice: "auto",
       }),
     );
+    tokens += spentOn(json.usage, 150);
     const call0 = json.choices?.[0]?.message?.tool_calls?.[0];
     if (call0?.function?.name === "ping") tools = "ok";
     else notes.push("Model không gọi công cụ khi được yêu cầu.");
   } catch (e) {
+    tokens += 150;
     notes.push(`Tools lỗi: ${message(e)}`);
+  }
+  // A 1x1 PNG: providers without image input reject the content part.
+  let vision: ProbeResult["vision"] = "failed";
+  try {
+    const json = await boundedJson(
+      await call({
+        model,
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Reply with OK." },
+              {
+                type: "image_url",
+                image_url: {
+                  url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==",
+                },
+              },
+            ],
+          },
+        ],
+        max_tokens: 16,
+      }),
+    );
+    tokens += spentOn(json.usage, 120);
+    if (typeof json.choices?.[0]?.message?.content === "string") vision = "ok";
+  } catch (e) {
+    tokens += 120;
+    notes.push(`Ảnh: ${message(e)}`);
   }
   return {
     content: content.slice(0, 200),
+    vision,
     stream,
     streamOptions,
     streamUsage,
     tools,
     usage,
+    tokens,
     notes,
   };
 }

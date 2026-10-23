@@ -4,6 +4,7 @@ export interface Project {
   description: string;
   research_goal: string;
   archived_at: string | null;
+  allow_external_lookup?: boolean;
 }
 export interface Session {
   id: string;
@@ -26,6 +27,7 @@ export interface Model {
   enabled: boolean;
   supports_tools: boolean;
   supports_stream: boolean;
+  supports_vision?: boolean;
   context_limit: number;
   max_output: number;
   input_price_per_million: string | null;
@@ -56,12 +58,39 @@ export interface Provider {
   quota?: ProviderQuota;
   models: Model[];
 }
+export interface TokenPreview {
+  providerName: string;
+  modelId: string;
+  calibrated: boolean;
+  input: number;
+  outputMax: number;
+  reserve: number;
+  toolRounds: boolean;
+  image: number;
+  supportsVision: boolean;
+  contextLimit: number;
+  breakdown: {
+    instructions: number;
+    data: number;
+    history: number;
+    question: number;
+    tools: number;
+  };
+  rows: { examined: number; sent: number; truncated: boolean };
+  history: { included: number; omitted: number };
+  reports: { id: string; title: string; revision: number; rowCount: number }[];
+  quota: ProviderQuota;
+  suggestions: string[];
+  fits: boolean;
+  reason: string | null;
+}
 export interface ProbeResult {
   content: string;
   stream: "ok" | "failed";
   streamOptions: "accepted" | "rejected" | null;
   streamUsage: boolean | null;
   tools: "ok" | "failed";
+  vision?: "ok" | "failed";
   usage: boolean;
   notes: string[];
 }
@@ -89,6 +118,18 @@ export interface Message {
   error_message: string | null;
   citations?: Citation[] | null;
   finish_reason?: string | null;
+  queue_position?: number | null;
+  feedback_rating?: 1 | -1 | null;
+  feedback_comment?: string | null;
+  tool_progress?: string[];
+  attachments?:
+    | {
+        type: string;
+        compoundName?: string;
+        scan?: string;
+        spectrumId?: string;
+      }[]
+    | null;
 }
 export interface RequestState {
   contextInfo?: {
@@ -104,6 +145,7 @@ export interface RequestState {
   content: string;
   citations: Citation[] | null;
   finishReason: string | null;
+  queuePosition: number | null;
   error: string | null;
   modelId: string;
   providerName: string;
@@ -122,6 +164,7 @@ export interface RequestState {
   usage: {
     input_tokens: number | null;
     output_tokens: number | null;
+    cached_input_tokens?: number | null;
     usage_source: string;
     estimated_cost: string | null;
     estimated_max_cost: string | null;

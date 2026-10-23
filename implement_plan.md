@@ -1,3 +1,76 @@
+## Mẫu Word tùy chỉnh (custom DOCX) — 23/10/2026
+
+**Trạng thái: Đã triển khai trên nhánh `feat/custom-docx` (chưa merge/push).** Yêu cầu gốc: ngoài xuất Word mặc định, cho người dùng tự soạn nội dung DOCX bằng giao diện giống Word, có bảng, và gán giá trị hiển thị theo dữ liệu báo cáo.
+
+### Đặc tả đã chỉnh
+
+- **Trang “Mẫu Word”** (thanh điều hướng): danh sách mẫu của tài khoản; tạo mới (từ “Mẫu cơ bản” giống bảng mặc định hoặc trang trắng), đổi tên, nhân bản, xóa. Tối đa 50 mẫu, nội dung ≤ 500KB.
+- **Trình soạn thảo kiểu Word** (TipTap 2, khổ A4): tiêu đề 1–3, đoạn văn, đậm/nghiêng/gạch chân, căn trái/giữa/phải/đều, danh sách chấm/số, ngắt trang, bảng (thêm/xóa hàng/cột, gộp/tách ô, hàng tiêu đề lặp lại mỗi trang). Thiết lập trang: dọc/ngang, lề (mm).
+- **Trường dữ liệu** chèn dưới dạng thẻ (chip), không gõ cú pháp:
+  - Báo cáo: tiêu đề, ngày xuất, nguồn (link GNPS2/tên file), task GNPS2, chế độ & dung sai m/z, dung sai RT.
+  - Tổng hợp: số dòng TSV, số dòng dữ liệu, đã khớp, chưa khớp, số dòng xuất, số có cấu trúc.
+  - AI: nháp “Kết quả và thảo luận” đã duyệt (khối nhiều đoạn).
+  - Theo dòng (chỉ trong hàng lặp): STT, tên hoạt chất, ion/adduct, m/z precursor, m/z dữ liệu, RT, Δppm, ΔDa, ΔRT, công thức (chỉ số dưới), fragments, trạng thái, số ứng viên, ảnh cấu trúc, SpectrumID, MQScore, SharedPeaks, SMILES, InChIKey, phân lớp NPClassifier.
+  - Trường số có tùy chọn số chữ số thập phân; định dạng số kiểu Việt Nam như mẫu mặc định.
+- **Hàng lặp**: đánh dấu một hàng của bảng “Lặp theo dòng dữ liệu”; khi xuất, hàng được nhân bản cho từng dòng theo bộ lọc của hàng đó: dòng đã chọn (mặc định, giống mẫu mặc định) / tất cả / matched / ambiguous / unmatched; sắp xếp theo thứ tự báo cáo hoặc |ppm| giảm dần.
+- **Xem trước**: chọn một báo cáo đã lưu để xem mẫu với dữ liệu thật (giới hạn 50 dòng lặp trong xem trước).
+- **Xuất**: màn báo cáo có lựa chọn mẫu cạnh nút “Xuất Word” (Mặc định hoặc mẫu tùy chỉnh). Server dựng DOCX bằng thư viện `docx` từ revision đã lưu (không tin dữ liệu client), lưu bản xuất vào “Ảnh và file” như mẫu mặc định.
+- **An toàn**: server chỉ nhận các loại node/mark/thuộc tính trong danh sách cho phép và khóa trường hợp lệ; văn bản được thư viện `docx` escape; ảnh chỉ lấy từ ảnh cấu trúc đã lưu của báo cáo.
+- **Ngoài phạm vi bản này**: chèn ảnh tĩnh/logo, header/footer, cỡ chữ/màu chữ tùy ý, nhập file .docx có sẵn làm mẫu.
+
+### Kết quả triển khai
+
+- Server: migration `0010_report_templates.sql`; `server/shared/report-template.ts` (danh mục trường, định dạng, hàng lặp, sanitizer — dùng chung với xem trước); `server/templates/render.ts` dựng DOCX bằng `docx`; `server/templates/routes.ts` CRUD/nhân bản; `POST /api/reports/:id/export/template/:templateId` dùng `prepareExport`/`archiveExport` như xuất mặc định.
+- Client: trang “Mẫu Word” (tải lười, TipTap 3.31.4 — không dùng 2.x vì GHSA-cp6q-959q-f8rh), thanh công cụ, chèn trường, cài đặt hàng lặp, số thập phân, trang A4 + thu phóng “Vừa khung”, tự lưu; xem trước với báo cáo thật; ô chọn mẫu cạnh “Xuất Word”.
+- Kiểm thử: 117 test (render DOCX, sanitizer, trường, API, xem trước). QA research-preview: tạo mẫu cơ bản, chèn trường, tự lưu, đổi bộ lọc hàng lặp và số thập phân (đã lưu server), xem trước 3 dòng, xuất DOCX 200 + lưu bản xuất, ô chọn mẫu trên màn báo cáo.
+- Chưa kiểm: mở file xuất bằng Microsoft Word/LibreOffice để xem định dạng thật; giao diện mobile của trình soạn thảo (bảng rộng, chủ yếu dùng trên máy tính).
+
+---
+
+## Nâng cấp AI giai đoạn 4 — phản hồi, tra cứu hóa học, ảnh phổ — 23/10/2026
+
+**Trạng thái: Đã triển khai trên nhánh `feat/ai-phase4` (chưa merge/push). Người dùng chọn 3 mục: tra cứu PubChem/NPClassifier, phản hồi + tiến trình, vision.**
+
+- Phản hồi (migration 0009 `ai_feedback`): 👍/👎 + góp ý cho câu trả lời đã xong; xuất của chính mình; quản trị chỉ thấy số đếm theo model. Tiến trình công cụ hiển thị từ tool runs khi lượt đang chạy. Đã sửa lỗi form góp ý gắn nhầm vào câu hỏi (cùng request_id) phát hiện khi QA.
+- Tra cứu: `lookup_compound` chỉ có khi project bật `allow_external_lookup`; kiểm tra định dạng InChIKey/SMILES, User-Agent rõ ràng, timeout 8s, 200KB, không theo redirect, cache 30 ngày (`ai_lookup_cache`). Kiểm tra mạng từ máy dev: NPClassifier trả kết quả; PubChem chuyển hướng sang trang chặn lạm dụng của NCBI — ứng dụng báo “blocked”, cần thử lại trên server deploy.
+- Vision: cờ `supports_vision`, Chat thử gửi PNG 1×1; “Kèm ảnh mirror plot” cho 1 dòng của báo cáo GNPS2 Task, PNG từ `metabolomics-usi.gnps2.org/png/mirror/` (đã thử endpoint: HTTP 200, ~57KB). Ảnh tính cố định ~1.100 token, không tính vào ngân sách byte; chỉ lưu USI trong `ai_requests.attachments`.
+- Kiểm thử: 110 test; QA research-preview: 👍/👎 + góp ý, công tắc tra cứu, ô kèm ảnh bật khi chọn 1 dòng (dự toán +1.100), lỗi rõ ràng khi báo cáo không phải GNPS2 Task. Chưa thử với model vision thật và báo cáo GNPS2 thật.
+
+---
+
+## Nâng cấp AI giai đoạn 3 — hàng đợi bền vững, cache token, quản trị — 23/10/2026
+
+**Trạng thái: Đã triển khai trên nhánh `feat/ai-phase3` (chưa merge/push).**
+
+- Hàng đợi bền vững (migration 0008): prompt lần gọi đầu lưu trên `ai_requests`; worker mỗi instance nhận việc bằng `FOR UPDATE SKIP LOCKED` dưới khóa bảng nên `AI_MAX_CONCURRENT` là toàn hệ thống. Lượt vượt giới hạn xếp hàng (`AI_MAX_QUEUED`) thay vì báo 429; chat hiện vị trí. Lượt chờ sống qua restart, chờ >10 phút thì lỗi; lượt đang chạy mất lease vẫn interrupted, không tự chạy lại. Prompt bị xóa khi lượt kết thúc.
+- Cache token: đọc `prompt_tokens_details.cached_tokens` (OpenAI) hoặc `prompt_cache_hit_tokens`/`cache_read_input_tokens`, lưu `ai_usage.cached_input_tokens`, hiển thị ở từng câu trả lời và thống kê. Thứ tự prompt hiện có đã giữ tiền tố ổn định trong một hội thoại.
+- Quản trị: `GET /ai/admin/usage` + khối trong Cài đặt AI cho `ADMIN_USER_IDS` hoặc `ADMIN_EMAILS` (chỉ email đã xác minh, chống chiếm email). Chỉ số liệu tổng hợp.
+- Kiểm thử: 100 test; QA research-preview: 3 lượt cùng lúc → lượt 3 “queued · vị trí 1” rồi hoàn tất; khối quản trị hiển thị đúng. Một lần chạy cả bộ, test xuất XLSX/DOCX của backend trả 503 rồi qua ở 3 lần chạy sau — nghi carbone chậm khi các file test chạy song song, chưa xác định nguyên nhân.
+- Chưa làm: đọc ảnh phổ (vision) — cần chọn nguồn ảnh (mirror plot GNPS2 hay ảnh cấu trúc) và model có vision; adapter native Anthropic/OpenAI Responses — MộtAPI là OpenAI-compatible nên chưa cần.
+
+---
+
+## Nâng cấp AI giai đoạn 2 — 23/10/2026
+
+**Trạng thái: Đã triển khai lần lượt theo yêu cầu “thực hiện lần lượt”, trên nhánh `feat/ai-phase2` (chưa merge/push).**
+
+1. Commit phần trước: người dùng đã tự commit `1e396e9`. Thử MộtAPI thật cần API key của người dùng — chưa làm.
+2. Ước lượng token (`server/ai/tokens.ts`) + hiệu chỉnh EMA theo usage thật/model (migration 0006); giữ chỗ lần gọi đầu khi gửi, mỗi vòng tools tự giữ chỗ dưới khóa. Ví dụ preview: ~2,7k token thay vì ~16k–80k trước đây.
+3. `POST /ai/conversations/:id/preview` + UI dự toán dưới ô câu hỏi, khóa Gửi khi vượt context/hạn mức.
+4. Hạn mức: gộp theo HMAC của API key; Chat thử ghi vào `ai_provider_usage_events`; cờ `stream_options_rejected` lưu DB.
+5. Ngăn chat trên màn báo cáo (`.ai-launcher`/`.ai-drawer` có sẵn) + dòng “Sẽ gửi”; chọn dòng làm mới dự toán.
+6. Xuất chat đổi mã trích dẫn thành tên báo cáo · dòng TSV; gợi ý câu hỏi theo dữ liệu.
+7. `server/ai/review.ts`: điểm cần duyệt + 4 công cụ mới; endpoint và panel Hàng đợi duyệt; top 5 đưa vào context ban đầu.
+8. Kiểm chứng trích dẫn ⚠ (không tốn token) và Nhờ AI kiểm tra lại (gửi đúng các dòng).
+9. Nháp “Kết quả và thảo luận” (migration 0007) chèn vào Word sau render carbone.
+10. Thống kê sử dụng 30 ngày (chỉ tài khoản mình — chưa có vai trò quản trị); `scripts/ai-eval.ts` 5 ca kiểm tra grounding/injection.
+
+Kiểm thử: 97 test, typecheck/build đạt; QA trình duyệt research-preview desktop 1440 và mobile 375 cho dự toán, ngăn chat, hàng đợi duyệt, kiểm chứng, nháp thảo luận, thống kê. Chưa chạy `ai-eval` với provider thật; chưa mở file Word xuất ra bằng Word để xem định dạng (đã kiểm XML trong test).
+
+Chưa làm (cần quyết định riêng): hàng đợi bền vững/nhiều instance (lượt AI vẫn chạy trong process), trang quản trị xem usage mọi tài khoản (cần vai trò admin), đọc ảnh phổ (vision), adapter Anthropic/Responses có prompt caching.
+
+---
+
 ## Mở AI chat (bỏ gate Coming soon) — 22/10/2026
 
 **Trạng thái: Đã triển khai theo yêu cầu người dùng “bỏ coming soon”.**

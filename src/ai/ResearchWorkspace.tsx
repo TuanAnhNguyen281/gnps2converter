@@ -4,6 +4,8 @@ import { useAccount } from "../Account";
 import { useConfirm } from "../Ui";
 import { ChatPanel, type ChatContext } from "./ChatPanel";
 import { ModelPicker } from "./AiSettings";
+import { ReviewQueue } from "./ReviewQueue";
+import { DiscussionDraft } from "./DiscussionDraft";
 import type { Project, Provider, Report, Session } from "./types";
 export function ResearchWorkspace({
   reportId,
@@ -12,13 +14,15 @@ export function ResearchWorkspace({
   onCreateReport,
   onSettings,
   compact = false,
+  contextKey,
 }: {
   reportId: string | null;
-  beforeSend: () => Promise<ChatContext>;
+  beforeSend: (options?: { save?: boolean }) => Promise<ChatContext>;
   onOpenReport: (id: string, rowIds?: string[]) => Promise<void>;
   onCreateReport: (projectId: string) => Promise<void>;
   onSettings: () => void;
   compact?: boolean;
+  contextKey?: unknown;
 }) {
   const { user } = useAccount(),
     confirm = useConfirm(),
@@ -169,8 +173,8 @@ export function ResearchWorkspace({
       setBusy(false);
     }
   }
-  async function context() {
-    const current = await beforeSend();
+  async function context(options?: { save?: boolean }) {
+    const current = await beforeSend(options);
     if (current.reportId && !reports.some((r) => r.id === current.reportId)) {
       if (compact)
         throw new Error(
@@ -329,6 +333,30 @@ export function ResearchWorkspace({
                   {project.archived_at ? "Mở lại" : "Lưu trữ"}
                 </button>
               </div>
+              <label className="ai-check lookup-toggle">
+                <input
+                  type="checkbox"
+                  checked={!!project.allow_external_lookup}
+                  disabled={busy || !!project.archived_at}
+                  onChange={(e) => {
+                    const allow = e.target.checked;
+                    void act(async () => {
+                      const p = await jsonApi<Project>(
+                        `/api/projects/${project.id}`,
+                        jsonBody({ allowExternalLookup: allow }, "PATCH"),
+                      );
+                      setProjects((prev) =>
+                        prev.map((x) => (x.id === p.id ? p : x)),
+                      );
+                    });
+                  }}
+                />
+                Cho AI tra cứu PubChem/NPClassifier
+              </label>
+              <small className="lookup-note">
+                Khi bật, InChIKey/SMILES của dòng được hỏi sẽ gửi tới PubChem và
+                NPClassifier (GNPS2); dữ liệu báo cáo khác không gửi đi.
+              </small>
               <label>
                 Phiên nghiên cứu
                 <select
@@ -537,6 +565,18 @@ export function ResearchWorkspace({
           )}
         </aside>
         <div className="research-main">
+          {reportId && (
+            <ReviewQueue
+              reportId={reportId}
+              revision={reports.find((r) => r.id === reportId)?.revision}
+              onOpenRow={(rowId) =>
+                void onOpenReport(reportId, [rowId]).catch((e) =>
+                  setError(e.message),
+                )
+              }
+            />
+          )}
+          {reportId && <DiscussionDraft reportId={reportId} />}
           {session && project && !project.archived_at ? (
             <ChatPanel
               key={session.id}
@@ -544,6 +584,7 @@ export function ResearchWorkspace({
               reports={reports}
               providers={providers}
               compact={compact}
+              contextKey={contextKey}
               beforeSend={context}
               onOpenReport={onOpenReport}
             />

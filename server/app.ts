@@ -2,6 +2,12 @@ import express from "express";
 import multer from "multer";
 import ExcelJS from "exceljs";
 import JSZip from "jszip";
+import { appendDiscussion } from "./ai/discussion.js";
+import { gnpsTask } from "./ai/spectrum.js";
+import { templatesRouter } from "./templates/routes.js";
+import { renderTemplateDocx } from "./templates/render.js";
+import { sanitizePage, sanitizeTemplate } from "./shared/report-template.js";
+import type { LookupFetch } from "./ai/lookup.js";
 import { parse } from "csv-parse/sync";
 import { createRequire } from "node:module";
 import { existsSync } from "node:fs";
@@ -44,14 +50,15 @@ import {
 import { MediaService } from "./media/service.js";
 import { ReportService } from "./reports/service.js";
 import type { PipelineProgress, ProgressReporter } from "./progress.js";
-import { researchRouter } from './ai/routes.js';
-import type { ProviderTransport } from './ai/provider.js';
+import { researchRouter } from "./ai/routes.js";
+import type { ProviderTransport } from "./ai/provider.js";
 
 export function createApp(
   config: Config,
   db?: Database,
   provider?: MediaProvider,
   aiTransport?: ProviderTransport,
+  aiFetchers?: { lookup?: LookupFetch; spectrum?: LookupFetch },
 ) {
   const media = db
     ? new MediaService(db, config, provider ?? cloudinaryProvider(config))
@@ -313,14 +320,16 @@ export function createApp(
     "/api",
     rateLimit({
       windowMs: 60000,
-      limit: 120,
+      limit: config.apiRateLimit,
       standardHeaders: "draft-7",
       legacyHeaders: false,
       message: { message: "Quá nhiều yêu cầu. Hãy thử lại sau." },
     }),
   );
   let active = 0;
-  if (db && reports) app.use('/api', researchRouter(db, config, aiTransport));
+  if (db && reports)
+    app.use("/api", researchRouter(db, config, aiTransport, aiFetchers));
+  if (db) app.use("/api", templatesRouter(db));
   app.use(
     [
       "/api/analyze",
@@ -630,7 +639,7 @@ export function createApp(
         title: report.title,
         fileName: report.title,
       };
-      res.locals.exportReport = { id, revision: report.revision };
+      res.locals.exportReport = { id, revision: report.revision, report };
       next();
     },
   );
@@ -725,7 +734,8 @@ export function createApp(
     name: "progress" | "result" | "error",
     data: PipelineProgress | unknown,
   ) => {
-    if (!res.writableEnded) res.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`);
+    if (!res.writableEnded)
+      res.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`);
   };
   const existingOperation: express.RequestHandler = route(
     async (req, res, next) => {
@@ -742,7 +752,10 @@ export function createApp(
         if (!wantsProgressStream(req)) return res.json(saved);
         startProgressStream(res);
         writeStreamEvent(res, "progress", {
-          stage: "complete", step: 6, totalSteps: 6, percent: 100,
+          stage: "complete",
+          step: 6,
+          totalSteps: 6,
+          percent: 100,
           title: "Báo cáo đã được lưu trước đó",
           message: "Đang mở dữ liệu đã lưu; không cần tải lại từ GNPS2.",
           outcome: "success",
@@ -784,9 +797,13 @@ export function createApp(
       };
     } catch (error) {
       progress?.({
-        stage: "database", step: 5, totalSteps: 6, percent: 75,
+        stage: "database",
+        step: 5,
+        totalSteps: 6,
+        percent: 75,
         title: "Chưa lưu được vào database",
-        message: "Dữ liệu đã đọc từ GNPS2 nhưng giao dịch lưu báo cáo thất bại.",
+        message:
+          "Dữ liệu đã đọc từ GNPS2 nhưng giao dịch lưu báo cáo thất bại.",
         detail: error instanceof ApiError ? error.message : undefined,
         outcome: "partial",
       });
@@ -870,12 +887,18 @@ export function createApp(
         );
         if (stream) {
           writeStreamEvent(response, "progress", {
-            stage: "complete", step: 6, totalSteps: 6, percent: 100,
-            title: saved.saveWarning ? "Đã nhập dữ liệu, cần kiểm tra lưu trữ" : "Đồng bộ dữ liệu hoàn tất",
+            stage: "complete",
+            step: 6,
+            totalSteps: 6,
+            percent: 100,
+            title: saved.saveWarning
+              ? "Đã nhập dữ liệu, cần kiểm tra lưu trữ"
+              : "Đồng bộ dữ liệu hoàn tất",
             message: saved.saveWarning
               ? String(saved.saveWarning)
               : `Đã nhập ${imported.rows.length} dòng, lưu báo cáo và xử lý ${imported.structures} ảnh cấu trúc cùng ${imported.sourceFiles.length} file nguồn.`,
-            current: imported.rows.length, total: imported.rows.length,
+            current: imported.rows.length,
+            total: imported.rows.length,
             succeeded: imported.rows.length,
             outcome: saved.saveWarning ? "partial" : "success",
           } satisfies PipelineProgress);
@@ -887,7 +910,8 @@ export function createApp(
         if (stream && response.headersSent) {
           const apiError = error instanceof ApiError ? error : undefined;
           writeStreamEvent(response, "error", {
-            message: apiError?.message ?? "Không thể hoàn tất đồng bộ dữ liệu GNPS2.",
+            message:
+              apiError?.message ?? "Không thể hoàn tất đồng bộ dữ liệu GNPS2.",
             code: apiError?.code,
           });
           return response.end();
@@ -933,11 +957,9 @@ export function createApp(
           !tsv.originalname.toLowerCase().endsWith(".tsv") ||
           !xlsx.originalname.toLowerCase().endsWith(".xlsx")
         ) {
-          return response
-            .status(400)
-            .json({
-              message: "Định dạng không hợp lệ. Chỉ chấp nhận .tsv và .xlsx.",
-            });
+          return response.status(400).json({
+            message: "Định dạng không hợp lệ. Chỉ chấp nhận .tsv và .xlsx.",
+          });
         }
 
         const parsedTsv = parseTsv(tsv.buffer);
@@ -1304,6 +1326,56 @@ export function createApp(
     return zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
   }
 
+  // Word export from a user template; same saved-revision rules as the default.
+  app.post(
+    "/api/reports/:id/export/template/:templateId",
+    prepareExport,
+    async (request, response, next) => {
+      try {
+        const report = response.locals.exportReport.report,
+          template = (
+            await db!.query(
+              "SELECT * FROM report_templates WHERE id=$1 AND owner_id=$2",
+              [
+                z.string().uuid().parse(request.params.templateId),
+                owner(request),
+              ],
+            )
+          ).rows[0];
+        if (!template) throw new ApiError(404, "Không tìm thấy mẫu Word.");
+        const draft = (
+          await db!.query(
+            "SELECT content FROM ai_report_drafts WHERE report_id=$1",
+            [response.locals.exportReport.id],
+          )
+        ).rows[0];
+        const output = await renderTemplateDocx(
+          sanitizeTemplate(template.content),
+          sanitizePage(template.page),
+          {
+            title: report.title,
+            sourceUrl: report.sourceUrl,
+            task: gnpsTask(report, report.sourceUrl),
+            exportedAt: new Date().toISOString(),
+            parameters: report.parameters,
+            summary: report.summary,
+            rows: report.rows,
+            discussion: draft?.content ?? null,
+          },
+        );
+        const name = safeName(`${report.title} - ${template.name}`);
+        await archiveExport(request, response, output, "docx", name);
+        response.set({
+          "Content-Type":
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          "Content-Disposition": contentDisposition(`${name}.docx`),
+        });
+        response.send(output);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
   app.post(
     "/api/reports/:id/export/docx",
     prepareExport,
@@ -1330,6 +1402,15 @@ export function createApp(
           output = await injectStructureImages(output, rows);
         } else output = await fallbackDocx(rows, title);
         output = await injectFormulaSubscripts(output, rows);
+        const draft = db
+          ? (
+              await db.query(
+                "SELECT content FROM ai_report_drafts WHERE report_id=$1",
+                [response.locals.exportReport.id],
+              )
+            ).rows[0]
+          : undefined;
+        if (draft) output = await appendDiscussion(output, draft.content);
         const name = safeName(body.fileName ?? title);
         await archiveExport(request, response, output, "docx", name);
         response.set({
@@ -1391,11 +1472,9 @@ export function createApp(
         throw new Error("GNPS2 response is not an array");
     } catch (error) {
       clearTimeout(timeout);
-      return response
-        .status(502)
-        .json({
-          message: `Không thể đọc Library Matches từ GNPS2: ${error instanceof Error ? error.message : "unknown error"}`,
-        });
+      return response.status(502).json({
+        message: `Không thể đọc Library Matches từ GNPS2: ${error instanceof Error ? error.message : "unknown error"}`,
+      });
     }
     clearTimeout(timeout);
     const normalize = (value: unknown) =>
@@ -1669,12 +1748,10 @@ export function createApp(
           "[GNPS2_API]",
           error instanceof ApiError ? error.code : "SERVICE_UNAVAILABLE",
         );
-      response
-        .status(status)
-        .json({
-          message,
-          code: error instanceof ApiError ? error.code : "REQUEST_FAILED",
-        });
+      response.status(status).json({
+        message,
+        code: error instanceof ApiError ? error.code : "REQUEST_FAILED",
+      });
     },
   );
 

@@ -19,6 +19,12 @@
   },
   "dependencies": {
     "@tanstack/react-table": "^8.20.5",
+    "@tiptap/core": "3.31.4",
+    "@tiptap/extension-table": "3.31.4",
+    "@tiptap/extension-text-align": "3.31.4",
+    "@tiptap/pm": "3.31.4",
+    "@tiptap/react": "3.31.4",
+    "@tiptap/starter-kit": "3.31.4",
     "argon2": "^0.45.1",
     "carbone": "^3.8.2",
     "cloudinary": "^2.11.0",

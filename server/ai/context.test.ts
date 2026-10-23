@@ -2,8 +2,10 @@ import { describe, it, expect } from "vitest";
 import { randomUUID } from "node:crypto";
 import {
   initialContext,
+  readableCitations,
   remapCitations,
   runTool,
+  suggestQuestions,
   summarize,
   toPrompt,
   tools,
@@ -169,6 +171,47 @@ describe("Research context and provider safeguards", () => {
     expect(
       remapCitations("A [R1-996, R2-1] B [R2-1]", citations, swapped),
     ).toBe("A [R2-996] B [nguồn ngoài phạm vi hiện tại]");
+  });
+  it("spells out citations for exports", () => {
+    const reports = [
+      {
+        id,
+        title: "Báo cáo A",
+        rows: [{ id: "row-0", sourceTsvRow: 12, compoundName: "Compound 0" }],
+      },
+    ];
+    expect(
+      readableCitations(
+        "Xem [R1] và [R1-1, R9-2]",
+        [
+          { ref: "R1", reportId: id, rowId: null, status: "ok" },
+          { ref: "R1-1", reportId: id, rowId: "row-0", status: "ok" },
+          { ref: "R9-2", reportId: null, rowId: null, status: "invalid" },
+        ],
+        reports,
+      ),
+    ).toBe(
+      "Xem [Báo cáo A] và [Báo cáo A · dòng TSV 12 (Compound 0); R9-2 (không tồn tại)]",
+    );
+    expect(readableCitations("Không có [R1]", null, reports)).toBe(
+      "Không có [R1]",
+    );
+  });
+  it("suggests questions from the rows in scope", () => {
+    const all = suggestQuestions(ctx);
+    expect(all[0]).toMatch(/^Vì sao \d+ dòng có sai số trên 10 ppm\?$/);
+    expect(all).toContain("So sánh Full report và Compare");
+    expect(all.length).toBeLessThanOrEqual(4);
+    const one = suggestQuestions({
+      ...ctx,
+      selection: {
+        ...ctx.selection,
+        scope: "selection",
+        selectedRowIds: ["row-3"],
+      },
+    });
+    expect(one[0]).toBe("Đánh giá độ tin cậy định danh của Compound 3");
+    expect(one.some((q) => q.includes("trên 10 ppm"))).toBe(false);
   });
   it("filters full snapshot rather than prompt sample and paginates matches", () => {
     const result = runTool(ctx, "query_report_rows", {

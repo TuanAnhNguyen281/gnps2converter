@@ -35,6 +35,17 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env) {
     aiDailyRequests: integer("AI_DAILY_REQUESTS", 100, 10000),
     aiDailyTokens: integer("AI_DAILY_TOKEN_BUDGET", 500000),
     aiMaxConcurrent: integer("AI_MAX_CONCURRENT", 2, 10),
+    aiMaxQueued: integer("AI_MAX_QUEUED", 20, 1000),
+    // Admins see aggregate AI usage of all accounts (never chat content).
+    // Emails only count once verified (Google sign-in), so they cannot be squatted.
+    adminUserIds: (env.ADMIN_USER_IDS ?? "")
+      .split(",")
+      .map((x) => x.trim().toLowerCase())
+      .filter(Boolean),
+    adminEmails: (env.ADMIN_EMAILS ?? "")
+      .split(",")
+      .map((x) => x.trim().toLowerCase())
+      .filter(Boolean),
     aiMaxStorageBytes: integer("AI_MAX_STORAGE_BYTES", 50000000),
     aiTimeoutMs: integer("AI_TIMEOUT_MS", 90000, 180000),
     googleId: env.GOOGLE_CLIENT_ID ?? "",
@@ -50,6 +61,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env) {
     maxFileBytes: integer("MAX_FILE_BYTES", 9_500_000, 9_500_000),
     maxImageBytes: integer("MAX_IMAGE_BYTES", 2_000_000, 9_500_000),
     concurrency: integer("MAX_HEAVY_REQUESTS", 2, 20),
+    apiRateLimit: integer("API_RATE_LIMIT", 120, 100000),
     trustProxy: env.TRUST_PROXY_HOPS
       ? integer("TRUST_PROXY_HOPS", 1, 5)
       : (false as false | number),

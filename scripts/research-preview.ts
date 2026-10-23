@@ -14,6 +14,11 @@ for (const migration of [
   "0003_ai_model_pricing.sql",
   "0004_ai_citations.sql",
   "0005_ai_quota_truncation.sql",
+  "0006_ai_token_estimate.sql",
+  "0007_ai_report_drafts.sql",
+  "0008_ai_request_queue.sql",
+  "0009_ai_feedback_lookup_vision.sql",
+  "0010_report_templates.sql",
 ])
   await sql.exec(
     await readFile(
@@ -65,6 +70,8 @@ const config = readConfig({
   SESSION_SECRET: "local-qa-only-secret-32-characters-long",
   AI_ENCRYPTION_KEY: "ef".repeat(32),
   AI_ALLOWED_HOSTS: "example.com",
+  // The QA account below is verified, so it also sees the admin panel.
+  ADMIN_EMAILS: "research-qa@example.test",
 });
 const app = createApp(
   config,
@@ -160,7 +167,7 @@ const app = createApp(
 );
 const user = randomUUID();
 await db.query(
-  "INSERT INTO users(id,email,display_name,password_hash) VALUES($1,$2,$3,$4)",
+  "INSERT INTO users(id,email,display_name,password_hash,email_verified_at) VALUES($1,$2,$3,$4,now())",
   [
     user,
     "research-qa@example.test",
@@ -192,6 +199,14 @@ const rows = ["A", "B", "C"].map((name, i) => ({
   id: `row-${name}`,
   compoundName: `Compound ${name}`,
   deltaPpm: [1, 5, 15][i],
+  sourceTsvRow: i + 2,
+  // Compound C (15 ppm, low MQScore, few peaks) lands in the review queue.
+  sourceMetadata: {
+    SpectrumID: `CCMSLIB0000${i + 1}`,
+    MQScore: [0.92, 0.85, 0.58][i],
+    SharedPeaks: [16, 12, 4][i],
+    ...(i < 2 ? { Smiles: "C1=CC=CC=C1" } : {}),
+  },
 }));
 const result = {
   source: "files",

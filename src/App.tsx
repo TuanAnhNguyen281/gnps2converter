@@ -1,4 +1,15 @@
-import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
+import {
+  Fragment,
+  Suspense,
+  lazy,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import type {
   AnalysisResult,
@@ -21,12 +32,24 @@ import {
   type GridSelection,
 } from "./result-table-grid";
 
-import { apiFetch, apiUrl, jsonApi, postProgressStream, type PipelineProgress } from "./api";
+import {
+  apiFetch,
+  apiUrl,
+  jsonApi,
+  postProgressStream,
+  type PipelineProgress,
+} from "./api";
 import { useReport, type SavedResult } from "./useReport";
 import { useAccount } from "./Account";
-import './ai/ai.css';
+import "./ai/ai.css";
 import { ResearchWorkspace } from "./ai/ResearchWorkspace";
 import { AiSettings } from "./ai/AiSettings";
+// The template editor pulls in TipTap; load it only when the page opens.
+const TemplatesPage = lazy(() =>
+  import("./templates/TemplatesPage").then((m) => ({
+    default: m.TemplatesPage,
+  })),
+);
 import type { ChatContext } from "./ai/ChatPanel";
 import {
   WorkspaceShell,
@@ -455,7 +478,9 @@ function MetadataCell({
           aria-label={`Chỉnh sửa ${text}`}
           onPointerDown={onEditorPointerDown}
           value={value}
-          onChange={(next) => onChange(numeric ? next : (next ? String(next) : null))}
+          onChange={(next) =>
+            onChange(numeric ? next : next ? String(next) : null)
+          }
         />
       ) : (
         <span className="readonly-cell-content">{text}</span>
@@ -503,7 +528,7 @@ function GridEditInput({
       {...props}
       className={className}
       type={type}
-      step={type === "number" ? step ?? "any" : undefined}
+      step={type === "number" ? (step ?? "any") : undefined}
       value={draft}
       onChange={(event) => {
         const next = event.target.value;
@@ -514,7 +539,8 @@ function GridEditInput({
         if (type === "number") commitNumber();
       }}
       onKeyDown={(event) => {
-        if (event.key === "Enter" && type === "number") event.currentTarget.blur();
+        if (event.key === "Enter" && type === "number")
+          event.currentTarget.blur();
       }}
     />
   );
@@ -837,7 +863,10 @@ export default function App() {
     initialEntry === "reports" ? "reports" : "upload",
   );
   const [reportListRevision, setReportListRevision] = useState(0);
-  const pendingProject = useRef<{id:string;oldReportId:string|null}|null>(null);
+  const pendingProject = useRef<{
+    id: string;
+    oldReportId: string | null;
+  } | null>(null);
   const [reportTab, setReportTab] = useState<"results" | "assets">("results");
   const ask = useConfirm();
   const [inputMode, setInputMode] = useState<"task" | "files">(
@@ -862,22 +891,38 @@ export default function App() {
   const [stage, setStage] = useState<Stage>("upload");
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const saved = useReport(stage === "results" ? result : null, reportTitle);
-  async function attachImportedReport(payload:SavedResult){
-    const pending=pendingProject.current;
-    if(!pending||!payload.reportId||payload.reportId===pending.oldReportId)return;
-    pendingProject.current=null;
-    try{await jsonApi(`/api/projects/${pending.id}/reports`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reportId:payload.reportId})});setReportListRevision(x=>x+1);}
-    catch(e){setError(`Báo cáo đã lưu nhưng chưa gắn project: ${(e as Error).message}. Mở Project & AI chat để thêm báo cáo.`);}
+  async function attachImportedReport(payload: SavedResult) {
+    const pending = pendingProject.current;
+    if (
+      !pending ||
+      !payload.reportId ||
+      payload.reportId === pending.oldReportId
+    )
+      return;
+    pendingProject.current = null;
+    try {
+      await jsonApi(`/api/projects/${pending.id}/reports`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reportId: payload.reportId }),
+      });
+      setReportListRevision((x) => x + 1);
+    } catch (e) {
+      setError(
+        `Báo cáo đã lưu nhưng chưa gắn project: ${(e as Error).message}. Mở Project & AI chat để thêm báo cáo.`,
+      );
+    }
   }
-  const saveBadgeState = saved.conflict || saved.status === "conflict"
-    ? "conflict"
-    : saved.saving
-      ? "saving"
-      : saved.status === "error" || saved.status === "partial"
-        ? saved.status
-        : saved.dirty()
-          ? "unsaved"
-          : saved.status;
+  const saveBadgeState =
+    saved.conflict || saved.status === "conflict"
+      ? "conflict"
+      : saved.saving
+        ? "saving"
+        : saved.status === "error" || saved.status === "partial"
+          ? saved.status
+          : saved.dirty()
+            ? "unsaved"
+            : saved.status;
   const saveBadgeLabel =
     saveBadgeState === "saving"
       ? saved.saveMethod === "automatic"
@@ -897,42 +942,79 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
-  const [gridSelection, setGridSelection] = useState<GridSelection | null>(null);
-  const [pinScopeKey, setPinScopeKey] = useState(() => `draft:${crypto.randomUUID()}`);
-  const [gridPinPreferences, setGridPinPreferences] = useState<Record<string, ReportGridPins>>(() => {
+  const [gridSelection, setGridSelection] = useState<GridSelection | null>(
+    null,
+  );
+  const [pinScopeKey, setPinScopeKey] = useState(
+    () => `draft:${crypto.randomUUID()}`,
+  );
+  const [gridPinPreferences, setGridPinPreferences] = useState<
+    Record<string, ReportGridPins>
+  >(() => {
     try {
-      const stored = JSON.parse(localStorage.getItem(gridPinStorageKey) || "{}") as Record<string, unknown>;
-      return Object.fromEntries(Object.entries(stored).flatMap(([key, value]) => {
-        if (!value || typeof value !== "object") return [];
-        const pins = value as Partial<ReportGridPins>;
-        return [[key, {
-          rowIds: Array.isArray(pins.rowIds) ? pins.rowIds.filter((id): id is string => typeof id === "string") : [],
-          columnKeys: Array.isArray(pins.columnKeys) ? pins.columnKeys.filter((column): column is string => typeof column === "string") : [],
-        } satisfies ReportGridPins]];
-      }));
+      const stored = JSON.parse(
+        localStorage.getItem(gridPinStorageKey) || "{}",
+      ) as Record<string, unknown>;
+      return Object.fromEntries(
+        Object.entries(stored).flatMap(([key, value]) => {
+          if (!value || typeof value !== "object") return [];
+          const pins = value as Partial<ReportGridPins>;
+          return [
+            [
+              key,
+              {
+                rowIds: Array.isArray(pins.rowIds)
+                  ? pins.rowIds.filter(
+                      (id): id is string => typeof id === "string",
+                    )
+                  : [],
+                columnKeys: Array.isArray(pins.columnKeys)
+                  ? pins.columnKeys.filter(
+                      (column): column is string => typeof column === "string",
+                    )
+                  : [],
+              } satisfies ReportGridPins,
+            ],
+          ];
+        }),
+      );
     } catch {
       return {};
     }
   });
   const [copyMessage, setCopyMessage] = useState("");
   const [allEditMode, setAllEditMode] = useState(false);
-  const [columnWidths, setColumnWidths] = useState<Record<string, number>>(() => {
-    try {
-      const stored = JSON.parse(localStorage.getItem(columnWidthStorageKey) || "{}") as Record<string, unknown>;
-      return Object.fromEntries(Object.entries(stored).filter(([, width]) =>
-        typeof width === "number" && Number.isFinite(width) && width >= minColumnWidth && width <= maxColumnWidth,
-      )) as Record<string, number>;
-    } catch {
-      return {};
-    }
-  });
-  const [editingCompoundId, setEditingCompoundId] = useState<string | null>(null);
+  const [columnWidths, setColumnWidths] = useState<Record<string, number>>(
+    () => {
+      try {
+        const stored = JSON.parse(
+          localStorage.getItem(columnWidthStorageKey) || "{}",
+        ) as Record<string, unknown>;
+        return Object.fromEntries(
+          Object.entries(stored).filter(
+            ([, width]) =>
+              typeof width === "number" &&
+              Number.isFinite(width) &&
+              width >= minColumnWidth &&
+              width <= maxColumnWidth,
+          ),
+        ) as Record<string, number>;
+      } catch {
+        return {};
+      }
+    },
+  );
+  const [editingCompoundId, setEditingCompoundId] = useState<string | null>(
+    null,
+  );
   const [compoundDraft, setCompoundDraft] = useState("");
   const tableWrapRef = useRef<HTMLDivElement>(null);
   const gridHeadRef = useRef<HTMLTableSectionElement>(null);
   const pinnedGridRowRefs = useRef(new Map<string, HTMLTableRowElement>());
   const [gridHeaderHeight, setGridHeaderHeight] = useState(42);
-  const [pinnedGridRowOffsets, setPinnedGridRowOffsets] = useState<Record<string, number>>({});
+  const [pinnedGridRowOffsets, setPinnedGridRowOffsets] = useState<
+    Record<string, number>
+  >({});
   const dragAnchorRef = useRef<{ row: number; column: number } | null>(null);
   const dragSelectionActiveRef = useRef(false);
   const columnResizeRef = useRef<ColumnResizeSession | null>(null);
@@ -952,8 +1034,31 @@ export default function App() {
   const [structureMessage, setStructureMessage] = useState("");
   const [sourceLoading, setSourceLoading] = useState(false);
   const [loadingMode, setLoadingMode] = useState<"task" | "files" | null>(null);
-  const [loadingProgress, setLoadingProgress] = useState<PipelineProgress | null>(null);
+  const [loadingProgress, setLoadingProgress] =
+    useState<PipelineProgress | null>(null);
   const [detailRow, setDetailRow] = useState<MatchRow | null>(null);
+  const [chatOpen, setChatOpen] = useState(false);
+  // Word export target: "" = built-in template, otherwise a user template id.
+  const [wordTemplates, setWordTemplates] = useState<
+    { id: string; name: string }[]
+  >([]);
+  const [wordTemplate, setWordTemplate] = useState("");
+  useEffect(() => {
+    if (page !== "results") return;
+    let alive = true;
+    void jsonApi<{ id: string; name: string }[]>("/api/report-templates")
+      .then((list) => {
+        if (!alive) return;
+        setWordTemplates(list);
+        setWordTemplate((current) =>
+          list.some((t) => t.id === current) ? current : "",
+        );
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [page]);
   const [viewerTarget, setViewerTarget] = useState<PreviewKind | null>(null);
   const [gnpsViewerOpen, setGnpsViewerOpen] = useState(false);
   const [gnpsFrameVersion, setGnpsFrameVersion] = useState(0);
@@ -973,7 +1078,10 @@ export default function App() {
   }, [columnWidths]);
   useEffect(() => {
     try {
-      localStorage.setItem(gridPinStorageKey, JSON.stringify(gridPinPreferences));
+      localStorage.setItem(
+        gridPinStorageKey,
+        JSON.stringify(gridPinPreferences),
+      );
     } catch {
       // Pinning remains available for this session when browser storage is unavailable.
     }
@@ -1124,11 +1232,13 @@ export default function App() {
       }
       saved.adopt(payload, reportTitle, [tsv, xlsx]);
       await attachImportedReport(payload as SavedResult);
-      setPinScopeKey((payload as SavedResult).reportId
-        ? `report:${(payload as SavedResult).reportId}`
-        : payload.task
-          ? `task:${payload.task}`
-          : `draft:${crypto.randomUUID()}`);
+      setPinScopeKey(
+        (payload as SavedResult).reportId
+          ? `report:${(payload as SavedResult).reportId}`
+          : payload.task
+            ? `task:${payload.task}`
+            : `draft:${crypto.randomUUID()}`,
+      );
       setGridSelection(null);
       setAllEditMode(false);
       setResult(payload);
@@ -1156,7 +1266,10 @@ export default function App() {
     setLoading(true);
     setLoadingMode("task");
     setLoadingProgress({
-      stage: "task", step: 1, totalSteps: 6, percent: 0,
+      stage: "task",
+      step: 1,
+      totalSteps: 6,
+      percent: 0,
       title: "Đang kết nối với GNPS2",
       message: "Đang gửi yêu cầu và chờ trạng thái task.",
       outcome: "working",
@@ -1164,25 +1277,33 @@ export default function App() {
     setError("");
     setStructureMessage("");
     try {
-      const payload = await postProgressStream<AnalysisResult & {
-        message?: string;
-        title?: string;
-        saveWarning?: string;
-      }>(apiUrl("/api/gnps-task/import?progress=stream"), {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Idempotency-Key": crypto.randomUUID(),
+      const payload = await postProgressStream<
+        AnalysisResult & {
+          message?: string;
+          title?: string;
+          saveWarning?: string;
+        }
+      >(
+        apiUrl("/api/gnps-task/import?progress=stream"),
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Idempotency-Key": crypto.randomUUID(),
+          },
+          body: JSON.stringify({ url: taskUrl.trim() }),
         },
-        body: JSON.stringify({ url: taskUrl.trim() }),
-      }, setLoadingProgress);
+        setLoadingProgress,
+      );
       saved.adopt(payload, payload.title || "GNPS2 Report");
       await attachImportedReport(payload as SavedResult);
-      setPinScopeKey((payload as SavedResult).reportId
-        ? `report:${(payload as SavedResult).reportId}`
-        : payload.task
-          ? `task:${payload.task}`
-          : `draft:${crypto.randomUUID()}`);
+      setPinScopeKey(
+        (payload as SavedResult).reportId
+          ? `report:${(payload as SavedResult).reportId}`
+          : payload.task
+            ? `task:${payload.task}`
+            : `draft:${crypto.randomUUID()}`,
+      );
       setGridSelection(null);
       setAllEditMode(false);
       if ((payload as SavedResult).saveWarning)
@@ -1274,13 +1395,27 @@ export default function App() {
   }, [result, query, status, sort]);
   const pinnedRowIds = gridPinPreferences[pinScopeKey]?.rowIds ?? [];
   const pinnedColumnKeys = gridPinPreferences[pinScopeKey]?.columnKeys ?? [];
-  const gridColumnKeys = useMemo(() => [
-    "stt", "rtDisplay", "compoundName", "adduct", "mzTsv", "fragments",
-    "molecularFormula", "reportedMzErrorPpm", "structure",
-    ...metadataColumns.map((column) => `metadata:${column}`),
-  ], [metadataColumns]);
+  const gridColumnKeys = useMemo(
+    () => [
+      "stt",
+      "rtDisplay",
+      "compoundName",
+      "adduct",
+      "mzTsv",
+      "fragments",
+      "molecularFormula",
+      "reportedMzErrorPpm",
+      "structure",
+      ...metadataColumns.map((column) => `metadata:${column}`),
+    ],
+    [metadataColumns],
+  );
   const visibleGridColumnKeys = useMemo(
-    () => orderPinnedColumns(gridColumnKeys, pinnedColumnKeys, ["stt", "compoundName"]),
+    () =>
+      orderPinnedColumns(gridColumnKeys, pinnedColumnKeys, [
+        "stt",
+        "compoundName",
+      ]),
     [gridColumnKeys, pinnedColumnKeys],
   );
   const orderedFilteredRows = useMemo(
@@ -1301,16 +1436,25 @@ export default function App() {
     if (!head) return;
     const measure = () => {
       const headerHeight = head.getBoundingClientRect().height;
-      setGridHeaderHeight((current) => Math.abs(current - headerHeight) < 0.5 ? current : headerHeight);
+      setGridHeaderHeight((current) =>
+        Math.abs(current - headerHeight) < 0.5 ? current : headerHeight,
+      );
       let top = headerHeight;
       const offsets: Record<string, number> = {};
       for (const row of pinnedVisibleRows) {
         offsets[row.id] = top;
-        top += pinnedGridRowRefs.current.get(row.id)?.getBoundingClientRect().height ?? 44;
+        top +=
+          pinnedGridRowRefs.current.get(row.id)?.getBoundingClientRect()
+            .height ?? 44;
       }
       setPinnedGridRowOffsets((current) => {
-        const keys = new Set([...Object.keys(current), ...Object.keys(offsets)]);
-        for (const key of keys) if (Math.abs((current[key] ?? -1) - (offsets[key] ?? -1)) >= 0.5) return offsets;
+        const keys = new Set([
+          ...Object.keys(current),
+          ...Object.keys(offsets),
+        ]);
+        for (const key of keys)
+          if (Math.abs((current[key] ?? -1) - (offsets[key] ?? -1)) >= 0.5)
+            return offsets;
         return current;
       });
     };
@@ -1325,17 +1469,27 @@ export default function App() {
     return () => observer.disconnect();
   }, [pinnedVisibleRows, visibleGridColumnKeys, columnWidths]);
   const columnWidth = (key: string) =>
-    columnWidths[key] ?? (key.startsWith("metadata:") ? 82 : defaultColumnWidths[key] ?? 82);
+    columnWidths[key] ??
+    (key.startsWith("metadata:") ? 82 : (defaultColumnWidths[key] ?? 82));
   const pinnedGridColumnLeft = (key: string) => {
     const index = visibleGridColumnKeys.indexOf(key);
-    if (index < 0 || (index > 1 && !pinnedColumnKeys.includes(key))) return undefined;
-    return 34 + visibleGridColumnKeys.slice(0, index).reduce((width, precedingKey) => width + columnWidth(precedingKey), 0);
+    if (index < 0 || (index > 1 && !pinnedColumnKeys.includes(key)))
+      return undefined;
+    return (
+      34 +
+      visibleGridColumnKeys
+        .slice(0, index)
+        .reduce((width, precedingKey) => width + columnWidth(precedingKey), 0)
+    );
   };
-  const gridColumnClass = (key: string) => [
-    key === "stt" ? "sticky-index" : "",
-    key === "compoundName" ? "sticky-compound" : "",
-    pinnedGridColumnLeft(key) != null ? "grid-column-pinned" : "",
-  ].filter(Boolean).join(" ");
+  const gridColumnClass = (key: string) =>
+    [
+      key === "stt" ? "sticky-index" : "",
+      key === "compoundName" ? "sticky-compound" : "",
+      pinnedGridColumnLeft(key) != null ? "grid-column-pinned" : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
   const gridColumnStyle = (key: string) => {
     const left = pinnedGridColumnLeft(key);
     return left == null ? undefined : { left };
@@ -1362,7 +1516,12 @@ export default function App() {
     event: ReactPointerEvent<HTMLElement>,
   ) => {
     const target = event.target instanceof HTMLElement ? event.target : null;
-    if (target?.closest("button") || (target?.closest("input,textarea,select") && !(event.ctrlKey || event.metaKey || event.shiftKey))) return;
+    if (
+      target?.closest("button") ||
+      (target?.closest("input,textarea,select") &&
+        !(event.ctrlKey || event.metaKey || event.shiftKey))
+    )
+      return;
     event.preventDefault();
     tableWrapRef.current?.focus({ preventScroll: true });
     setCopyMessage("");
@@ -1370,15 +1529,23 @@ export default function App() {
     if (event.ctrlKey || event.metaKey) {
       dragSelectionActiveRef.current = false;
       dragAnchorRef.current = null;
-      setGridSelection((current) => toggleGridCellSelection(current, row, column));
+      setGridSelection((current) =>
+        toggleGridCellSelection(current, row, column),
+      );
       return;
     }
-    const anchor = event.shiftKey && gridSelection ? gridSelection.anchor : point;
+    const anchor =
+      event.shiftKey && gridSelection ? gridSelection.anchor : point;
     dragAnchorRef.current = anchor;
     dragSelectionActiveRef.current = true;
     setGridSelection({ anchor, focus: point });
   };
-  const handleGridEditorPointerDown = (row: number, column: number, event: ReactPointerEvent<HTMLInputElement>, selectCell = false) => {
+  const handleGridEditorPointerDown = (
+    row: number,
+    column: number,
+    event: ReactPointerEvent<HTMLInputElement>,
+    selectCell = false,
+  ) => {
     event.stopPropagation();
     if (event.ctrlKey || event.metaKey || event.shiftKey) {
       selectGridCell(row, column, event);
@@ -1390,8 +1557,17 @@ export default function App() {
       setGridSelection({ anchor: point, focus: point });
     }
   };
-  const extendGridDrag = (row: number, column: number, event: ReactPointerEvent<HTMLTableCellElement>) => {
-    if (!dragSelectionActiveRef.current || !dragAnchorRef.current || event.buttons === 0) return;
+  const extendGridDrag = (
+    row: number,
+    column: number,
+    event: ReactPointerEvent<HTMLTableCellElement>,
+  ) => {
+    if (
+      !dragSelectionActiveRef.current ||
+      !dragAnchorRef.current ||
+      event.buttons === 0
+    )
+      return;
     event.preventDefault();
     setGridSelection({ anchor: dragAnchorRef.current, focus: { row, column } });
   };
@@ -1406,10 +1582,17 @@ export default function App() {
     setCopyMessage("");
     setGridSelection(makeGridRowSelection(row, gridColumnCount));
   };
-  const beginColumnResize = (key: string, event: ReactPointerEvent<HTMLSpanElement>) => {
+  const beginColumnResize = (
+    key: string,
+    event: ReactPointerEvent<HTMLSpanElement>,
+  ) => {
     event.preventDefault();
     event.stopPropagation();
-    columnResizeRef.current = { key, startX: event.clientX, startWidth: columnWidth(key) };
+    columnResizeRef.current = {
+      key,
+      startX: event.clientX,
+      startWidth: columnWidth(key),
+    };
     event.currentTarget.setPointerCapture(event.pointerId);
   };
   const moveColumnResize = (event: ReactPointerEvent<HTMLSpanElement>) => {
@@ -1417,21 +1600,33 @@ export default function App() {
     if (!session) return;
     event.preventDefault();
     event.stopPropagation();
-    const nextWidth = Math.max(minColumnWidth, Math.min(maxColumnWidth, session.startWidth + event.clientX - session.startX));
+    const nextWidth = Math.max(
+      minColumnWidth,
+      Math.min(
+        maxColumnWidth,
+        session.startWidth + event.clientX - session.startX,
+      ),
+    );
     setColumnWidths((current) => ({ ...current, [session.key]: nextWidth }));
   };
   const finishColumnResize = (event: ReactPointerEvent<HTMLSpanElement>) => {
     event.stopPropagation();
     columnResizeRef.current = null;
   };
-  const resizeColumnByKeyboard = (key: string, event: KeyboardEvent<HTMLSpanElement>) => {
+  const resizeColumnByKeyboard = (
+    key: string,
+    event: KeyboardEvent<HTMLSpanElement>,
+  ) => {
     if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
     event.preventDefault();
     event.stopPropagation();
     const change = event.key === "ArrowLeft" ? -8 : 8;
     setColumnWidths((current) => ({
       ...current,
-      [key]: Math.max(minColumnWidth, Math.min(maxColumnWidth, columnWidth(key) + change)),
+      [key]: Math.max(
+        minColumnWidth,
+        Math.min(maxColumnWidth, columnWidth(key) + change),
+      ),
     }));
   };
   const isGridCellSelected = (row: number, column: number) =>
@@ -1448,8 +1643,12 @@ export default function App() {
   const selectedPinColumnKeys = selectedGridTargets.columns
     .map((index) => visibleGridColumnKeys[index])
     .filter((key) => key && key !== "stt" && key !== "compoundName");
-  const selectedRowsArePinned = selectedPinRowIds.length > 0 && selectedPinRowIds.every((id) => pinnedRowIds.includes(id));
-  const selectedColumnsArePinned = selectedPinColumnKeys.length > 0 && selectedPinColumnKeys.every((key) => pinnedColumnKeys.includes(key));
+  const selectedRowsArePinned =
+    selectedPinRowIds.length > 0 &&
+    selectedPinRowIds.every((id) => pinnedRowIds.includes(id));
+  const selectedColumnsArePinned =
+    selectedPinColumnKeys.length > 0 &&
+    selectedPinColumnKeys.every((key) => pinnedColumnKeys.includes(key));
   const updateCurrentGridPins = (patch: Partial<ReportGridPins>) => {
     setGridPinPreferences((current) => ({
       ...current,
@@ -1463,7 +1662,8 @@ export default function App() {
   const toggleSelectedRowsPin = () => {
     if (!selectedPinRowIds.length) return;
     const current = new Set(pinnedRowIds);
-    if (selectedRowsArePinned) selectedPinRowIds.forEach((id) => current.delete(id));
+    if (selectedRowsArePinned)
+      selectedPinRowIds.forEach((id) => current.delete(id));
     else selectedPinRowIds.forEach((id) => current.add(id));
     updateCurrentGridPins({ rowIds: [...current] });
     setGridSelection(null);
@@ -1471,7 +1671,8 @@ export default function App() {
   const toggleSelectedColumnsPin = () => {
     if (!selectedPinColumnKeys.length) return;
     const current = new Set(pinnedColumnKeys);
-    if (selectedColumnsArePinned) selectedPinColumnKeys.forEach((key) => current.delete(key));
+    if (selectedColumnsArePinned)
+      selectedPinColumnKeys.forEach((key) => current.delete(key));
     else selectedPinColumnKeys.forEach((key) => current.add(key));
     updateCurrentGridPins({ columnKeys: [...current] });
     setGridSelection(null);
@@ -1481,55 +1682,89 @@ export default function App() {
     setGridSelection(null);
   };
   const copyGridSelection = async () => {
-    const copied = selectionToTsv(orderedFilteredRows, gridSelection, metadataColumns, visibleGridColumnKeys);
+    const copied = selectionToTsv(
+      orderedFilteredRows,
+      gridSelection,
+      metadataColumns,
+      visibleGridColumnKeys,
+    );
     if (!copied) return;
     try {
       await navigator.clipboard.writeText(copied.text);
-      setCopyMessage(`Đã sao chép ${copied.rowCount} hàng × ${copied.columnCount} cột.`);
+      setCopyMessage(
+        `Đã sao chép ${copied.rowCount} hàng × ${copied.columnCount} cột.`,
+      );
     } catch {
-      setCopyMessage("Không thể truy cập clipboard. Hãy cho phép trình duyệt sao chép dữ liệu.");
+      setCopyMessage(
+        "Không thể truy cập clipboard. Hãy cho phép trình duyệt sao chép dữ liệu.",
+      );
     }
   };
   const handleGridKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     const target = event.target;
-    const isEditor = target instanceof HTMLElement && (
-      target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)
-    );
+    const isEditor =
+      target instanceof HTMLElement &&
+      (target.isContentEditable ||
+        /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName));
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c") {
-      const compoundEditor = target instanceof HTMLInputElement && target.classList.contains("compound-name-input");
-      const multipleGridCells = !!gridSelection && (gridSelection.cells
-        ? gridSelection.cells.length > 1
-        : gridSelection.anchor.row !== gridSelection.focus.row || gridSelection.anchor.column !== gridSelection.focus.column);
-      const hasSelectedText = compoundEditor && target.selectionStart !== target.selectionEnd;
-      if (!gridSelection || (isEditor && !compoundEditor) || (hasSelectedText && !multipleGridCells)) return;
+      const compoundEditor =
+        target instanceof HTMLInputElement &&
+        target.classList.contains("compound-name-input");
+      const multipleGridCells =
+        !!gridSelection &&
+        (gridSelection.cells
+          ? gridSelection.cells.length > 1
+          : gridSelection.anchor.row !== gridSelection.focus.row ||
+            gridSelection.anchor.column !== gridSelection.focus.column);
+      const hasSelectedText =
+        compoundEditor && target.selectionStart !== target.selectionEnd;
+      if (
+        !gridSelection ||
+        (isEditor && !compoundEditor) ||
+        (hasSelectedText && !multipleGridCells)
+      )
+        return;
       event.preventDefault();
       void copyGridSelection();
       return;
     }
     if (isEditor || !gridSelection || !orderedFilteredRows.length) return;
     if (event.key === "Tab") {
-      const current = gridSelection.focus.row * gridColumnCount + gridSelection.focus.column;
+      const current =
+        gridSelection.focus.row * gridColumnCount + gridSelection.focus.column;
       const next = current + (event.shiftKey ? -1 : 1);
-      if (next < 0 || next >= orderedFilteredRows.length * gridColumnCount) return;
+      if (next < 0 || next >= orderedFilteredRows.length * gridColumnCount)
+        return;
       event.preventDefault();
-      const point = { row: Math.floor(next / gridColumnCount), column: next % gridColumnCount };
+      const point = {
+        row: Math.floor(next / gridColumnCount),
+        column: next % gridColumnCount,
+      };
       setGridSelection({ anchor: point, focus: point });
       return;
     }
-    if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key)) return;
+    if (
+      !["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key)
+    )
+      return;
     event.preventDefault();
     const deltaByKey: Record<string, [number, number]> = {
-      ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1],
+      ArrowUp: [-1, 0],
+      ArrowDown: [1, 0],
+      ArrowLeft: [0, -1],
+      ArrowRight: [0, 1],
     };
     const delta = deltaByKey[event.key] ?? [0, 0];
-    setGridSelection(moveGridSelection(
-      gridSelection,
-      delta[0],
-      delta[1],
-      orderedFilteredRows.length,
-      gridColumnCount,
-      event.shiftKey,
-    ));
+    setGridSelection(
+      moveGridSelection(
+        gridSelection,
+        delta[0],
+        delta[1],
+        orderedFilteredRows.length,
+        gridColumnCount,
+        event.shiftKey,
+      ),
+    );
   };
   const compareUrl = result ? gnpsCompareUrl(result, gnpsUrl || taskUrl) : "";
   const engineLabel =
@@ -1571,13 +1806,26 @@ export default function App() {
         : current,
     );
   }
-  function updateMetadata(id: string, column: string, value: string | number | null) {
-    setResult((current) => current ? {
-      ...current,
-      rows: current.rows.map((row) => row.id === id
-        ? { ...row, sourceMetadata: { ...row.sourceMetadata, [column]: value } }
-        : row),
-    } : current);
+  function updateMetadata(
+    id: string,
+    column: string,
+    value: string | number | null,
+  ) {
+    setResult((current) =>
+      current
+        ? {
+            ...current,
+            rows: current.rows.map((row) =>
+              row.id === id
+                ? {
+                    ...row,
+                    sourceMetadata: { ...row.sourceMetadata, [column]: value },
+                  }
+                : row,
+            ),
+          }
+        : current,
+    );
   }
   function saveCompoundName(id: string) {
     const compoundName = compoundDraft.trim();
@@ -1588,9 +1836,17 @@ export default function App() {
     setGridSelection(null);
     setEditingCompoundId(null);
   }
-  const pinnedColumnIndicator = (key: string) => pinnedColumnKeys.includes(key)
-    ? <span className="grid-pin-indicator" role="img" aria-label="Cột đang ghim" title="Cột đang ghim">{icons.pin}</span>
-    : null;
+  const pinnedColumnIndicator = (key: string) =>
+    pinnedColumnKeys.includes(key) ? (
+      <span
+        className="grid-pin-indicator"
+        role="img"
+        aria-label="Cột đang ghim"
+        title="Cột đang ghim"
+      >
+        {icons.pin}
+      </span>
+    ) : null;
   const renderSortableGridHeader = (
     key: string,
     index: number,
@@ -1602,7 +1858,11 @@ export default function App() {
       className={`${gridColumnClass(key)} sortable-column grid-column-header`}
       style={gridColumnStyle(key)}
       onClick={() => selectGridColumn(index)}
-      title={key === "compoundName" ? "Bấm để chọn toàn bộ cột Compound name rồi sao chép" : undefined}
+      title={
+        key === "compoundName"
+          ? "Bấm để chọn toàn bộ cột Compound name rồi sao chép"
+          : undefined
+      }
     >
       {sortableHeader(key, label, subtitle, kind)}
       {pinnedColumnIndicator(key)}
@@ -1610,25 +1870,88 @@ export default function App() {
     </th>
   );
   const renderGridColumnHeader = (key: string, index: number) => {
-    if (key === "stt") return (
-      <th className={`${gridColumnClass(key)} grid-column-header`} style={gridColumnStyle(key)} onClick={() => selectGridColumn(index)} title="Chọn cột số thứ tự để sao chép">
-        <small className="table-heading-en">No.</small><span className="table-heading-vn">STT</span>
-        {columnResizer(key, "STT")}
-      </th>
-    );
-    if (key === "rtDisplay") return renderSortableGridHeader(key, index, "Thời gian lưu", "tR (min)", "number");
-    if (key === "compoundName") return renderSortableGridHeader(key, index, "Tên hoạt chất dự đoán", "Compound name", "text");
-    if (key === "adduct") return renderSortableGridHeader(key, index, "Ion / chất cộng", "Ion / adduct", "text");
-    if (key === "mzTsv") return renderSortableGridHeader(key, index, "Ion tiền chất", "Precursor m/z", "number");
-    if (key === "fragments") return renderSortableGridHeader(key, index, "Mảnh vỡ", "Fragments (m/z)", "text");
-    if (key === "molecularFormula") return renderSortableGridHeader(key, index, "Công thức phân tử", "Molecular formula", "text");
-    if (key === "reportedMzErrorPpm") return renderSortableGridHeader(key, index, "Sai số MZ", "MZ error (ppm)", "number");
-    if (key === "structure") return (
-      <th className={`${gridColumnClass(key)} grid-column-header`} style={gridColumnStyle(key)} onClick={() => selectGridColumn(index)}>
-        <small className="table-heading-en">Structure</small><span className="table-heading-vn">Cấu trúc phân tử</span>
-        {pinnedColumnIndicator(key)}{columnResizer(key, "cấu trúc phân tử")}
-      </th>
-    );
+    if (key === "stt")
+      return (
+        <th
+          className={`${gridColumnClass(key)} grid-column-header`}
+          style={gridColumnStyle(key)}
+          onClick={() => selectGridColumn(index)}
+          title="Chọn cột số thứ tự để sao chép"
+        >
+          <small className="table-heading-en">No.</small>
+          <span className="table-heading-vn">STT</span>
+          {columnResizer(key, "STT")}
+        </th>
+      );
+    if (key === "rtDisplay")
+      return renderSortableGridHeader(
+        key,
+        index,
+        "Thời gian lưu",
+        "tR (min)",
+        "number",
+      );
+    if (key === "compoundName")
+      return renderSortableGridHeader(
+        key,
+        index,
+        "Tên hoạt chất dự đoán",
+        "Compound name",
+        "text",
+      );
+    if (key === "adduct")
+      return renderSortableGridHeader(
+        key,
+        index,
+        "Ion / chất cộng",
+        "Ion / adduct",
+        "text",
+      );
+    if (key === "mzTsv")
+      return renderSortableGridHeader(
+        key,
+        index,
+        "Ion tiền chất",
+        "Precursor m/z",
+        "number",
+      );
+    if (key === "fragments")
+      return renderSortableGridHeader(
+        key,
+        index,
+        "Mảnh vỡ",
+        "Fragments (m/z)",
+        "text",
+      );
+    if (key === "molecularFormula")
+      return renderSortableGridHeader(
+        key,
+        index,
+        "Công thức phân tử",
+        "Molecular formula",
+        "text",
+      );
+    if (key === "reportedMzErrorPpm")
+      return renderSortableGridHeader(
+        key,
+        index,
+        "Sai số MZ",
+        "MZ error (ppm)",
+        "number",
+      );
+    if (key === "structure")
+      return (
+        <th
+          className={`${gridColumnClass(key)} grid-column-header`}
+          style={gridColumnStyle(key)}
+          onClick={() => selectGridColumn(index)}
+        >
+          <small className="table-heading-en">Structure</small>
+          <span className="table-heading-vn">Cấu trúc phân tử</span>
+          {pinnedColumnIndicator(key)}
+          {columnResizer(key, "cấu trúc phân tử")}
+        </th>
+      );
     const column = key.slice("metadata:".length);
     return (
       <th
@@ -1638,15 +1961,31 @@ export default function App() {
         style={gridColumnStyle(key)}
         onClick={() => selectGridColumn(index)}
       >
-        {sortableHeader(`metadata:${column}`, metadataHeaderLabel(column), column, metadataSortKinds.get(column) ?? "text")}
-        {pinnedColumnIndicator(key)}{columnResizer(key, metadataHeaderLabel(column))}
+        {sortableHeader(
+          `metadata:${column}`,
+          metadataHeaderLabel(column),
+          column,
+          metadataSortKinds.get(column) ?? "text",
+        )}
+        {pinnedColumnIndicator(key)}
+        {columnResizer(key, metadataHeaderLabel(column))}
       </th>
     );
   };
-  const gridCellStyle = (key: string, row: MatchRow, pinnedRow: boolean): CSSProperties => {
+  const gridCellStyle = (
+    key: string,
+    row: MatchRow,
+    pinnedRow: boolean,
+  ): CSSProperties => {
     const style: CSSProperties = { ...(gridColumnStyle(key) ?? {}) };
     if (pinnedRow) {
-      const fallbackOffset = gridHeaderHeight + Math.max(0, pinnedVisibleRows.findIndex((item) => item.id === row.id)) * 44;
+      const fallbackOffset =
+        gridHeaderHeight +
+        Math.max(
+          0,
+          pinnedVisibleRows.findIndex((item) => item.id === row.id),
+        ) *
+          44;
       style.top = pinnedGridRowOffsets[row.id] ?? fallbackOffset;
     }
     return style;
@@ -1662,73 +2001,266 @@ export default function App() {
     const pinnedClassName = `${gridColumnClass(key)} ${pinnedRow ? "grid-row-pinned-cell" : ""}`;
     const style = gridCellStyle(key, row, pinnedRow);
     const pointerProps = {
-      onPointerDown: (event: ReactPointerEvent<HTMLTableCellElement>) => selectGridCell(rowIndex, columnIndex, event),
-      onPointerEnter: (event: ReactPointerEvent<HTMLTableCellElement>) => extendGridDrag(rowIndex, columnIndex, event),
+      onPointerDown: (event: ReactPointerEvent<HTMLTableCellElement>) =>
+        selectGridCell(rowIndex, columnIndex, event),
+      onPointerEnter: (event: ReactPointerEvent<HTMLTableCellElement>) =>
+        extendGridDrag(rowIndex, columnIndex, event),
     };
     const selectionClassName = selected ? "grid-cell-selected" : "";
-    if (key === "stt") return (
-      <td
-        className={`mono faint grid-cell grid-row-header ${pinnedClassName} ${isGridRowSelected(rowIndex) ? "grid-cell-selected" : ""}`}
-        style={style}
-        onClick={() => selectGridRow(rowIndex)}
-        title={pinnedRow ? "Hàng đang ghim. Chọn hàng để sao chép" : "Chọn hàng để sao chép"}
-      >
-        {rowIndex + 1}{pinnedRow && <span className="grid-pin-indicator" role="img" aria-label="Hàng đang ghim" title="Hàng đang ghim">{icons.pin}</span>}
-      </td>
-    );
-    if (key === "rtDisplay") return (
-      <td className={`rt-cell grid-cell ${pinnedClassName} ${selectionClassName}`} style={style} title={row.rtDisplay} {...pointerProps}>
-        {allEditMode
-          ? <GridEditInput className="grid-edit-input" value={row.rtDisplay} aria-label={`Sửa thời gian lưu dòng ${rowIndex + 1}`} onPointerDown={(event) => handleGridEditorPointerDown(rowIndex, columnIndex, event)} onChange={(value) => update(row.id, { rtDisplay: String(value ?? "") })} />
-          : <span className="readonly-cell-content mono">{row.rtDisplay || "—"}</span>}
-      </td>
-    );
-    if (key === "compoundName") return (
-      <td className={`wrapping-cell compound-cell grid-cell ${pinnedClassName} ${selectionClassName}`} style={style} title={row.compoundName} {...pointerProps}>
-        <input className="grid-edit-input compound-name-input" value={row.compoundName} aria-label={`Tên hoạt chất dòng ${rowIndex + 1}`} onFocus={() => {
-          const point = { row: rowIndex, column: columnIndex };
-          setGridSelection({ anchor: point, focus: point });
-        }} onPointerDown={(event) => handleGridEditorPointerDown(rowIndex, columnIndex, event, true)} onChange={(event) => {
-          update(row.id, { compoundName: event.target.value });
-          setDetailRow((current) => current?.id === row.id ? { ...current, compoundName: event.target.value } : current);
-        }} />
-      </td>
-    );
-    if (key === "adduct") return (
-      <td className={`grid-cell ${pinnedClassName} ${selectionClassName}`} style={style} title={row.adduct} {...pointerProps}>
-        {allEditMode ? <GridEditInput className="grid-edit-input" value={row.adduct} aria-label={`Sửa ion / chất cộng dòng ${rowIndex + 1}`} onPointerDown={(event) => handleGridEditorPointerDown(rowIndex, columnIndex, event)} onChange={(value) => update(row.id, { adduct: String(value ?? "") })} /> : <span className="readonly-cell-content mono">{row.adduct || "—"}</span>}
-      </td>
-    );
-    if (key === "mzTsv") return (
-      <td className={`grid-cell ${pinnedClassName} ${selectionClassName}`} style={style} title={row.mzTsv == null ? "" : String(row.mzTsv)} {...pointerProps}>
-        {allEditMode ? <GridEditInput className="grid-edit-input mono" type="number" value={row.mzTsv} aria-label={`Sửa ion tiền chất dòng ${rowIndex + 1}`} onPointerDown={(event) => handleGridEditorPointerDown(rowIndex, columnIndex, event)} onChange={(value) => update(row.id, { mzTsv: Number(value) || 0 })} /> : <span className="readonly-cell-content mono">{row.mzTsv ?? "—"}</span>}
-      </td>
-    );
-    if (key === "fragments") return (
-      <td className={`wrapping-cell fragments-cell grid-cell ${pinnedClassName} ${selectionClassName}`} style={style} title={row.fragments} {...pointerProps}>
-        {allEditMode ? <GridEditInput className="grid-edit-input mono" value={row.fragments} aria-label={`Sửa mảnh vỡ dòng ${rowIndex + 1}`} onPointerDown={(event) => handleGridEditorPointerDown(rowIndex, columnIndex, event)} onChange={(value) => update(row.id, { fragments: String(value ?? "") })} /> : <span className="readonly-cell-content mono">{row.fragments || "—"}</span>}
-      </td>
-    );
-    if (key === "molecularFormula") return (
-      <td className={`formula-cell grid-cell ${pinnedClassName} ${selectionClassName}`} style={style} title={row.molecularFormula} {...pointerProps}>
-        {allEditMode ? <GridEditInput className="grid-edit-input mono" value={row.molecularFormula} aria-label={`Sửa công thức phân tử dòng ${rowIndex + 1}`} onPointerDown={(event) => handleGridEditorPointerDown(rowIndex, columnIndex, event)} onChange={(value) => update(row.id, { molecularFormula: String(value ?? "") })} /> : <span className="readonly-cell-content mono">{row.molecularFormula || "—"}</span>}
-      </td>
-    );
-    if (key === "reportedMzErrorPpm") return (
-      <td className={`ppm-cell grid-cell ${pinnedClassName} ${selectionClassName}`} style={style} title={row.reportedMzErrorPpm == null ? "" : String(row.reportedMzErrorPpm)} {...pointerProps}>
-        {allEditMode ? <GridEditInput className="grid-edit-input mono" type="number" value={row.reportedMzErrorPpm} aria-label={`Sửa sai số MZ dòng ${rowIndex + 1}`} onPointerDown={(event) => handleGridEditorPointerDown(rowIndex, columnIndex, event)} onChange={(value) => update(row.id, { reportedMzErrorPpm: typeof value === "number" ? value : null })} /> : <span className="readonly-cell-content mono">{row.reportedMzErrorPpm ?? "—"}</span>}
-      </td>
-    );
-    if (key === "structure") return (
-      <td className={`structure-cell grid-cell ${pinnedClassName} ${selectionClassName}`} style={style} title={row.structureUrl || "Chưa tra cứu"} {...pointerProps}>
-        {row.structureData ? <button className="structure-preview" type="button" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => {
-          event.stopPropagation();
-          setDetailRow(row);
-        }} aria-label={`Xem chi tiết ${row.compoundName}`}>
-          <img loading="lazy" src={row.structureData} alt={`Cấu trúc ${row.compoundName}`} /><small>Xem chi tiết</small>
-        </button> : <span>Chưa tra cứu</span>}
-      </td>
-    );
+    if (key === "stt")
+      return (
+        <td
+          className={`mono faint grid-cell grid-row-header ${pinnedClassName} ${isGridRowSelected(rowIndex) ? "grid-cell-selected" : ""}`}
+          style={style}
+          onClick={() => selectGridRow(rowIndex)}
+          title={
+            pinnedRow
+              ? "Hàng đang ghim. Chọn hàng để sao chép"
+              : "Chọn hàng để sao chép"
+          }
+        >
+          {rowIndex + 1}
+          {pinnedRow && (
+            <span
+              className="grid-pin-indicator"
+              role="img"
+              aria-label="Hàng đang ghim"
+              title="Hàng đang ghim"
+            >
+              {icons.pin}
+            </span>
+          )}
+        </td>
+      );
+    if (key === "rtDisplay")
+      return (
+        <td
+          className={`rt-cell grid-cell ${pinnedClassName} ${selectionClassName}`}
+          style={style}
+          title={row.rtDisplay}
+          {...pointerProps}
+        >
+          {allEditMode ? (
+            <GridEditInput
+              className="grid-edit-input"
+              value={row.rtDisplay}
+              aria-label={`Sửa thời gian lưu dòng ${rowIndex + 1}`}
+              onPointerDown={(event) =>
+                handleGridEditorPointerDown(rowIndex, columnIndex, event)
+              }
+              onChange={(value) =>
+                update(row.id, { rtDisplay: String(value ?? "") })
+              }
+            />
+          ) : (
+            <span className="readonly-cell-content mono">
+              {row.rtDisplay || "—"}
+            </span>
+          )}
+        </td>
+      );
+    if (key === "compoundName")
+      return (
+        <td
+          className={`wrapping-cell compound-cell grid-cell ${pinnedClassName} ${selectionClassName}`}
+          style={style}
+          title={row.compoundName}
+          {...pointerProps}
+        >
+          <input
+            className="grid-edit-input compound-name-input"
+            value={row.compoundName}
+            aria-label={`Tên hoạt chất dòng ${rowIndex + 1}`}
+            onFocus={() => {
+              const point = { row: rowIndex, column: columnIndex };
+              setGridSelection({ anchor: point, focus: point });
+            }}
+            onPointerDown={(event) =>
+              handleGridEditorPointerDown(rowIndex, columnIndex, event, true)
+            }
+            onChange={(event) => {
+              update(row.id, { compoundName: event.target.value });
+              setDetailRow((current) =>
+                current?.id === row.id
+                  ? { ...current, compoundName: event.target.value }
+                  : current,
+              );
+            }}
+          />
+        </td>
+      );
+    if (key === "adduct")
+      return (
+        <td
+          className={`grid-cell ${pinnedClassName} ${selectionClassName}`}
+          style={style}
+          title={row.adduct}
+          {...pointerProps}
+        >
+          {allEditMode ? (
+            <GridEditInput
+              className="grid-edit-input"
+              value={row.adduct}
+              aria-label={`Sửa ion / chất cộng dòng ${rowIndex + 1}`}
+              onPointerDown={(event) =>
+                handleGridEditorPointerDown(rowIndex, columnIndex, event)
+              }
+              onChange={(value) =>
+                update(row.id, { adduct: String(value ?? "") })
+              }
+            />
+          ) : (
+            <span className="readonly-cell-content mono">
+              {row.adduct || "—"}
+            </span>
+          )}
+        </td>
+      );
+    if (key === "mzTsv")
+      return (
+        <td
+          className={`grid-cell ${pinnedClassName} ${selectionClassName}`}
+          style={style}
+          title={row.mzTsv == null ? "" : String(row.mzTsv)}
+          {...pointerProps}
+        >
+          {allEditMode ? (
+            <GridEditInput
+              className="grid-edit-input mono"
+              type="number"
+              value={row.mzTsv}
+              aria-label={`Sửa ion tiền chất dòng ${rowIndex + 1}`}
+              onPointerDown={(event) =>
+                handleGridEditorPointerDown(rowIndex, columnIndex, event)
+              }
+              onChange={(value) =>
+                update(row.id, { mzTsv: Number(value) || 0 })
+              }
+            />
+          ) : (
+            <span className="readonly-cell-content mono">
+              {row.mzTsv ?? "—"}
+            </span>
+          )}
+        </td>
+      );
+    if (key === "fragments")
+      return (
+        <td
+          className={`wrapping-cell fragments-cell grid-cell ${pinnedClassName} ${selectionClassName}`}
+          style={style}
+          title={row.fragments}
+          {...pointerProps}
+        >
+          {allEditMode ? (
+            <GridEditInput
+              className="grid-edit-input mono"
+              value={row.fragments}
+              aria-label={`Sửa mảnh vỡ dòng ${rowIndex + 1}`}
+              onPointerDown={(event) =>
+                handleGridEditorPointerDown(rowIndex, columnIndex, event)
+              }
+              onChange={(value) =>
+                update(row.id, { fragments: String(value ?? "") })
+              }
+            />
+          ) : (
+            <span className="readonly-cell-content mono">
+              {row.fragments || "—"}
+            </span>
+          )}
+        </td>
+      );
+    if (key === "molecularFormula")
+      return (
+        <td
+          className={`formula-cell grid-cell ${pinnedClassName} ${selectionClassName}`}
+          style={style}
+          title={row.molecularFormula}
+          {...pointerProps}
+        >
+          {allEditMode ? (
+            <GridEditInput
+              className="grid-edit-input mono"
+              value={row.molecularFormula}
+              aria-label={`Sửa công thức phân tử dòng ${rowIndex + 1}`}
+              onPointerDown={(event) =>
+                handleGridEditorPointerDown(rowIndex, columnIndex, event)
+              }
+              onChange={(value) =>
+                update(row.id, { molecularFormula: String(value ?? "") })
+              }
+            />
+          ) : (
+            <span className="readonly-cell-content mono">
+              {row.molecularFormula || "—"}
+            </span>
+          )}
+        </td>
+      );
+    if (key === "reportedMzErrorPpm")
+      return (
+        <td
+          className={`ppm-cell grid-cell ${pinnedClassName} ${selectionClassName}`}
+          style={style}
+          title={
+            row.reportedMzErrorPpm == null ? "" : String(row.reportedMzErrorPpm)
+          }
+          {...pointerProps}
+        >
+          {allEditMode ? (
+            <GridEditInput
+              className="grid-edit-input mono"
+              type="number"
+              value={row.reportedMzErrorPpm}
+              aria-label={`Sửa sai số MZ dòng ${rowIndex + 1}`}
+              onPointerDown={(event) =>
+                handleGridEditorPointerDown(rowIndex, columnIndex, event)
+              }
+              onChange={(value) =>
+                update(row.id, {
+                  reportedMzErrorPpm: typeof value === "number" ? value : null,
+                })
+              }
+            />
+          ) : (
+            <span className="readonly-cell-content mono">
+              {row.reportedMzErrorPpm ?? "—"}
+            </span>
+          )}
+        </td>
+      );
+    if (key === "structure")
+      return (
+        <td
+          className={`structure-cell grid-cell ${pinnedClassName} ${selectionClassName}`}
+          style={style}
+          title={row.structureUrl || "Chưa tra cứu"}
+          {...pointerProps}
+        >
+          {row.structureData ? (
+            <button
+              className="structure-preview"
+              type="button"
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                setDetailRow(row);
+              }}
+              aria-label={`Xem chi tiết ${row.compoundName}`}
+            >
+              <img
+                loading="lazy"
+                src={row.structureData}
+                alt={`Cấu trúc ${row.compoundName}`}
+              />
+              <small>Xem chi tiết</small>
+            </button>
+          ) : (
+            <span>Chưa tra cứu</span>
+          )}
+        </td>
+      );
     const column = key.slice("metadata:".length);
     return (
       <MetadataCell
@@ -1740,20 +2272,26 @@ export default function App() {
         onChange={(value) => updateMetadata(row.id, column, value)}
         onPointerDown={pointerProps.onPointerDown}
         onPointerEnter={pointerProps.onPointerEnter}
-        onEditorPointerDown={(event) => handleGridEditorPointerDown(rowIndex, columnIndex, event)}
+        onEditorPointerDown={(event) =>
+          handleGridEditorPointerDown(rowIndex, columnIndex, event)
+        }
         className={`${pinnedClassName} ${selectionClassName}`}
         style={style}
       />
     );
   };
   async function openReport(payload: SavedResult, discard = false) {
-    pendingProject.current=null;
+    pendingProject.current = null;
     if (!discard && saved.dirty()) await saved.saveNow();
     setGridSelection(null);
     setAllEditMode(false);
     setEditingCompoundId(null);
     setResult(payload);
-    setPinScopeKey(payload.reportId ? `report:${payload.reportId}` : `draft:${crypto.randomUUID()}`);
+    setPinScopeKey(
+      payload.reportId
+        ? `report:${payload.reportId}`
+        : `draft:${crypto.randomUUID()}`,
+    );
     setReportTitle(payload.title || "GNPS2 Report");
     saved.adopt(payload, payload.title || "GNPS2 Report");
     setStage("results");
@@ -1816,7 +2354,9 @@ export default function App() {
       const id = saved.getId();
       if (!id) throw new Error("Cần lưu báo cáo trước khi xuất.");
       const failed = await download(
-        `/api/reports/${id}/export/${type}`,
+        type === "docx" && wordTemplate
+          ? `/api/reports/${id}/export/template/${wordTemplate}`
+          : `/api/reports/${id}/export/${type}`,
         saved.getRevision(),
         type,
         reportTitle,
@@ -1876,33 +2416,46 @@ export default function App() {
   }
 
   // Chat reads the saved revision, so flush edits first and send the grid's selected rows.
-  async function chatContext(): Promise<ChatContext> {
-    if (stage !== "results" || !result) return { reportId: null, revision: 0, selectedRowIds: [] };
-    if (saved.dirty()) await saved.saveNow();
+  async function chatContext(options?: {
+    save?: boolean;
+  }): Promise<ChatContext> {
+    if (stage !== "results" || !result)
+      return { reportId: null, revision: 0, selectedRowIds: [] };
+    if (options?.save !== false && saved.dirty()) await saved.saveNow();
     const rows = new Set<number>();
-    if (gridSelection?.cells) for (const cell of gridSelection.cells) rows.add(cell.row);
+    if (gridSelection?.cells)
+      for (const cell of gridSelection.cells) rows.add(cell.row);
     else if (gridSelection) {
-      const [from, to] = [gridSelection.anchor.row, gridSelection.focus.row].sort((a, b) => a - b);
+      const [from, to] = [
+        gridSelection.anchor.row,
+        gridSelection.focus.row,
+      ].sort((a, b) => a - b);
       for (let row = from; row <= to; row++) rows.add(row);
     }
     return {
       reportId: saved.getId(),
       revision: saved.getRevision(),
-      selectedRowIds: [...rows].map((row) => orderedFilteredRows[row]?.id).filter((id): id is string => !!id),
+      selectedRowIds: [...rows]
+        .map((row) => orderedFilteredRows[row]?.id)
+        .filter((id): id is string => !!id),
       viewState: { filter: query, sort: sort ? JSON.stringify(sort) : "" },
     };
   }
   async function openReportFromChat(id: string, rowIds?: string[]) {
-    const payload = saved.getId() === id && result ? null : await jsonApi<SavedResult>(`/api/reports/${id}`);
+    const payload =
+      saved.getId() === id && result
+        ? null
+        : await jsonApi<SavedResult>(`/api/reports/${id}`);
     if (payload) await openReport(payload);
     else setPage("results");
     // A single cited row opens its detail view; several rows just open the report.
     const rows = (payload ?? result)?.rows ?? [];
-    const row = rowIds?.length === 1 ? rows.find((r) => r.id === rowIds[0]) : undefined;
+    const row =
+      rowIds?.length === 1 ? rows.find((r) => r.id === rowIds[0]) : undefined;
     if (row) setDetailRow(row);
   }
   async function navigate(next: WorkspacePage) {
-    pendingProject.current=null;
+    pendingProject.current = null;
     if (loading || sourceLoading || exporting || structureLoading)
       throw new Error("Hãy đợi thao tác hiện tại hoàn tất.");
     if (saved.dirty()) await saved.saveNow();
@@ -1986,6 +2539,11 @@ export default function App() {
         />
       )}
       {page === "ai-settings" && <AiSettings />}
+      {page === "templates" && (
+        <Suspense fallback={<p role="status">Đang tải trình soạn mẫu…</p>}>
+          <TemplatesPage />
+        </Suspense>
+      )}
       <AnimatePresence mode="wait">
         {page === "upload" ? (
           <motion.section
@@ -2241,9 +2799,7 @@ export default function App() {
                   {(saveBadgeState === "error" ||
                     saveBadgeState === "partial") &&
                     saved.errorMessage && (
-                      <span className="save-detail">
-                        {saved.errorMessage}
-                      </span>
+                      <span className="save-detail">{saved.errorMessage}</span>
                     )}
                   <span>
                     {result.rows.length.toLocaleString("vi-VN")} dòng ·{" "}
@@ -2295,6 +2851,22 @@ export default function App() {
                   )}
                   {exporting === "xlsx" ? "Đang tạo…" : "Xuất Excel"}
                 </button>
+                {wordTemplates.length > 0 && (
+                  <select
+                    className="word-template-select"
+                    aria-label="Mẫu Word dùng để xuất"
+                    value={wordTemplate}
+                    disabled={!!exporting}
+                    onChange={(e) => setWordTemplate(e.target.value)}
+                  >
+                    <option value="">Mẫu Word mặc định</option>
+                    {wordTemplates.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
                 <button
                   className="ui-button primary"
                   onClick={() => void doExport("docx")}
@@ -2605,11 +3177,17 @@ export default function App() {
                       type="button"
                       aria-pressed={allEditMode}
                       onClick={() => setAllEditMode((active) => !active)}
-                      title={allEditMode ? "Kết thúc chỉnh sửa các trường" : "Mở chỉnh sửa tất cả trường dữ liệu"}
+                      title={
+                        allEditMode
+                          ? "Kết thúc chỉnh sửa các trường"
+                          : "Mở chỉnh sửa tất cả trường dữ liệu"
+                      }
                     >
                       <span className="table-action-label">
                         <b>{allEditMode ? "Finish editing" : "Edit all"}</b>
-                        <small>{allEditMode ? "Xong chỉnh sửa" : "Sửa tất cả"}</small>
+                        <small>
+                          {allEditMode ? "Xong chỉnh sửa" : "Sửa tất cả"}
+                        </small>
                       </span>
                     </button>
                     <button
@@ -2617,29 +3195,70 @@ export default function App() {
                       type="button"
                       disabled={!selectedPinRowIds.length}
                       onClick={toggleSelectedRowsPin}
-                      aria-label={selectedRowsArePinned ? "Bỏ ghim hàng đang chọn" : "Ghim hàng đang chọn"}
-                      title={selectedRowsArePinned ? "Bỏ ghim các hàng đang chọn" : "Ghim các hàng đang chọn"}
+                      aria-label={
+                        selectedRowsArePinned
+                          ? "Bỏ ghim hàng đang chọn"
+                          : "Ghim hàng đang chọn"
+                      }
+                      title={
+                        selectedRowsArePinned
+                          ? "Bỏ ghim các hàng đang chọn"
+                          : "Ghim các hàng đang chọn"
+                      }
                     >
-                      {icons.pin}<span className="table-action-label"><b>{selectedRowsArePinned ? "Unpin rows" : "Pin rows"}</b><small>{selectedRowsArePinned ? "Bỏ ghim hàng" : "Ghim hàng"}</small></span>
+                      {icons.pin}
+                      <span className="table-action-label">
+                        <b>
+                          {selectedRowsArePinned ? "Unpin rows" : "Pin rows"}
+                        </b>
+                        <small>
+                          {selectedRowsArePinned ? "Bỏ ghim hàng" : "Ghim hàng"}
+                        </small>
+                      </span>
                     </button>
                     <button
                       className="table-copy-button table-pin-button"
                       type="button"
                       disabled={!selectedPinColumnKeys.length}
                       onClick={toggleSelectedColumnsPin}
-                      aria-label={selectedColumnsArePinned ? "Bỏ ghim cột đang chọn" : "Ghim cột đang chọn"}
-                      title={selectedColumnsArePinned ? "Bỏ ghim các cột đang chọn" : "Ghim các cột đang chọn"}
+                      aria-label={
+                        selectedColumnsArePinned
+                          ? "Bỏ ghim cột đang chọn"
+                          : "Ghim cột đang chọn"
+                      }
+                      title={
+                        selectedColumnsArePinned
+                          ? "Bỏ ghim các cột đang chọn"
+                          : "Ghim các cột đang chọn"
+                      }
                     >
-                      {icons.pin}<span className="table-action-label"><b>{selectedColumnsArePinned ? "Unpin columns" : "Pin columns"}</b><small>{selectedColumnsArePinned ? "Bỏ ghim cột" : "Ghim cột"}</small></span>
+                      {icons.pin}
+                      <span className="table-action-label">
+                        <b>
+                          {selectedColumnsArePinned
+                            ? "Unpin columns"
+                            : "Pin columns"}
+                        </b>
+                        <small>
+                          {selectedColumnsArePinned
+                            ? "Bỏ ghim cột"
+                            : "Ghim cột"}
+                        </small>
+                      </span>
                     </button>
                     <button
                       className="table-copy-button table-pin-button"
                       type="button"
-                      disabled={!pinnedRowIds.length && !pinnedColumnKeys.length}
+                      disabled={
+                        !pinnedRowIds.length && !pinnedColumnKeys.length
+                      }
                       onClick={unpinAllGridItems}
                       title="Bỏ ghim hàng và cột đã ghim thêm; STT và tên hoạt chất vẫn cố định"
                     >
-                      <span className="table-action-label"><b>Unpin all</b><small>Bỏ ghim tất cả</small></span>
+                      <span className="table-action-label">
+                        <b>Unpin all</b>
+                        <small>Bỏ ghim tất cả</small>
+                      </span>
                     </button>
                     <button
                       className="table-copy-button"
@@ -2648,14 +3267,26 @@ export default function App() {
                       onClick={() => void copyGridSelection()}
                       title="Sao chép vùng đang chọn để dán vào Excel"
                     >
-                      {icons.copy}<span className="table-action-label"><b>Copy selection</b><small>Sao chép vùng chọn</small></span>
+                      {icons.copy}
+                      <span className="table-action-label">
+                        <b>Copy selection</b>
+                        <small>Sao chép vùng chọn</small>
+                      </span>
                     </button>
                     <span className="result-count">
                       {filtered.length} kết quả · {metadataColumns.length}{" "}
                       trường nguồn
                     </span>
                   </div>
-                  {copyMessage && <span className="table-copy-status" role="status" aria-live="polite">{copyMessage}</span>}
+                  {copyMessage && (
+                    <span
+                      className="table-copy-status"
+                      role="status"
+                      aria-live="polite"
+                    >
+                      {copyMessage}
+                    </span>
+                  )}
                   <div
                     className="table-wrap result-table-wrap"
                     ref={tableWrapRef}
@@ -2666,7 +3297,9 @@ export default function App() {
                     <table className="result-table">
                       <colgroup>
                         <col style={{ width: 34 }} />
-                        {visibleGridColumnKeys.map((key) => <col key={key} style={{ width: columnWidth(key) }} />)}
+                        {visibleGridColumnKeys.map((key) => (
+                          <col key={key} style={{ width: columnWidth(key) }} />
+                        ))}
                       </colgroup>
                       <thead ref={gridHeadRef}>
                         <tr>
@@ -2675,44 +3308,81 @@ export default function App() {
                               type="checkbox"
                               aria-label="Chọn tất cả dòng báo cáo"
                               title="Chọn các dòng sẽ đưa vào báo cáo"
-                              checked={selectedCount === result.rows.length && !!selectedCount}
+                              checked={
+                                selectedCount === result.rows.length &&
+                                !!selectedCount
+                              }
                               onChange={(event) => {
                                 setGridSelection(null);
                                 setResult({
                                   ...result,
-                                  rows: result.rows.map((row) => ({ ...row, selected: event.target.checked })),
+                                  rows: result.rows.map((row) => ({
+                                    ...row,
+                                    selected: event.target.checked,
+                                  })),
                                 });
                               }}
                             />
                           </th>
-                          {visibleGridColumnKeys.map((key, index) => <Fragment key={key}>{renderGridColumnHeader(key, index)}</Fragment>)}
+                          {visibleGridColumnKeys.map((key, index) => (
+                            <Fragment key={key}>
+                              {renderGridColumnHeader(key, index)}
+                            </Fragment>
+                          ))}
                         </tr>
                       </thead>
                       {pinnedVisibleRows.length > 0 && (
                         <tbody className="grid-pinned-rows">
                           {pinnedVisibleRows.map((row) => {
-                            const index = orderedFilteredRows.findIndex((item) => item.id === row.id);
+                            const index = orderedFilteredRows.findIndex(
+                              (item) => item.id === row.id,
+                            );
                             return (
                               <tr
                                 key={row.id}
                                 ref={(element) => {
-                                  if (element) pinnedGridRowRefs.current.set(row.id, element);
+                                  if (element)
+                                    pinnedGridRowRefs.current.set(
+                                      row.id,
+                                      element,
+                                    );
                                   else pinnedGridRowRefs.current.delete(row.id);
                                 }}
                                 className={`grid-row-pinned ${!row.selected ? "muted" : ""}`}
                               >
-                                <td className="sticky-select grid-row-pinned-cell" style={{ top: pinnedGridRowOffsets[row.id] ?? gridHeaderHeight }}>
+                                <td
+                                  className="sticky-select grid-row-pinned-cell"
+                                  style={{
+                                    top:
+                                      pinnedGridRowOffsets[row.id] ??
+                                      gridHeaderHeight,
+                                  }}
+                                >
                                   <input
                                     type="checkbox"
                                     aria-label={`Chọn ${row.compoundName}`}
                                     checked={row.selected}
                                     onChange={(event) => {
                                       setGridSelection(null);
-                                      update(row.id, { selected: event.target.checked });
+                                      update(row.id, {
+                                        selected: event.target.checked,
+                                      });
                                     }}
                                   />
                                 </td>
-                                {visibleGridColumnKeys.map((key, columnIndex) => <Fragment key={key}>{renderGridDataCell(row, index, key, columnIndex, true)}</Fragment>)}
+                                {visibleGridColumnKeys.map(
+                                  (key, columnIndex) => (
+                                    <Fragment key={key}>
+                                      {renderGridDataCell(
+                                        row,
+                                        index,
+                                        key,
+                                        columnIndex,
+                                        true,
+                                      )}
+                                    </Fragment>
+                                  ),
+                                )}
                               </tr>
                             );
                           })}
@@ -2720,9 +3390,14 @@ export default function App() {
                       )}
                       <tbody>
                         {scrollingVisibleRows.map((row) => {
-                          const index = orderedFilteredRows.findIndex((item) => item.id === row.id);
+                          const index = orderedFilteredRows.findIndex(
+                            (item) => item.id === row.id,
+                          );
                           return (
-                            <tr key={row.id} className={!row.selected ? "muted" : ""}>
+                            <tr
+                              key={row.id}
+                              className={!row.selected ? "muted" : ""}
+                            >
                               <td className="sticky-select">
                                 <input
                                   type="checkbox"
@@ -2730,11 +3405,23 @@ export default function App() {
                                   checked={row.selected}
                                   onChange={(event) => {
                                     setGridSelection(null);
-                                    update(row.id, { selected: event.target.checked });
+                                    update(row.id, {
+                                      selected: event.target.checked,
+                                    });
                                   }}
                                 />
                               </td>
-                              {visibleGridColumnKeys.map((key, columnIndex) => <Fragment key={key}>{renderGridDataCell(row, index, key, columnIndex, false)}</Fragment>)}
+                              {visibleGridColumnKeys.map((key, columnIndex) => (
+                                <Fragment key={key}>
+                                  {renderGridDataCell(
+                                    row,
+                                    index,
+                                    key,
+                                    columnIndex,
+                                    false,
+                                  )}
+                                </Fragment>
+                              ))}
                             </tr>
                           );
                         })}
@@ -2980,17 +3667,26 @@ export default function App() {
                 )}
               </div>
               <div className="compound-dialog-content">
-                <small className="dialog-form-title-en">COMPOUND INFORMATION</small>
-                <small className="dialog-form-title-vn">THÔNG TIN HỢP CHẤT · CHỈ ĐỌC</small>
+                <small className="dialog-form-title-en">
+                  COMPOUND INFORMATION
+                </small>
+                <small className="dialog-form-title-vn">
+                  THÔNG TIN HỢP CHẤT · CHỈ ĐỌC
+                </small>
                 <div className="dialog-name">
-                  <span className="dialog-label-pair"><b>Compound name</b><small>Tên hoạt chất</small></span>
+                  <span className="dialog-label-pair">
+                    <b>Compound name</b>
+                    <small>Tên hoạt chất</small>
+                  </span>
                   {editingCompoundId === detailRow.id ? (
                     <div className="dialog-name-editor">
                       <input
                         id="compound-dialog-title"
                         autoFocus
                         value={compoundDraft}
-                        onChange={(event) => setCompoundDraft(event.target.value)}
+                        onChange={(event) =>
+                          setCompoundDraft(event.target.value)
+                        }
                         onKeyDown={(event) => {
                           if (event.key === "Enter") {
                             event.preventDefault();
@@ -3000,12 +3696,26 @@ export default function App() {
                           }
                         }}
                       />
-                      <button type="button" className="dialog-edit-save" onClick={() => saveCompoundName(detailRow.id)}>Lưu</button>
-                      <button type="button" className="dialog-edit-cancel" onClick={() => setEditingCompoundId(null)}>Hủy</button>
+                      <button
+                        type="button"
+                        className="dialog-edit-save"
+                        onClick={() => saveCompoundName(detailRow.id)}
+                      >
+                        Lưu
+                      </button>
+                      <button
+                        type="button"
+                        className="dialog-edit-cancel"
+                        onClick={() => setEditingCompoundId(null)}
+                      >
+                        Hủy
+                      </button>
                     </div>
                   ) : (
                     <div className="dialog-name-value">
-                      <strong id="compound-dialog-title">{detailRow.compoundName || "—"}</strong>
+                      <strong id="compound-dialog-title">
+                        {detailRow.compoundName || "—"}
+                      </strong>
                       <button
                         type="button"
                         onClick={() => {
@@ -3013,39 +3723,61 @@ export default function App() {
                           setCompoundDraft(detailRow.compoundName);
                           setEditingCompoundId(detailRow.id);
                         }}
-                      >Sửa tên</button>
+                      >
+                        Sửa tên
+                      </button>
                     </div>
                   )}
                 </div>
                 <div className="dialog-fields">
                   <div className="dialog-readonly-field">
-                    <span><b>Retention time</b><small>Thời gian lưu · tR (min)</small></span>
+                    <span>
+                      <b>Retention time</b>
+                      <small>Thời gian lưu · tR (min)</small>
+                    </span>
                     <strong>{detailRow.rtDisplay || "—"}</strong>
                   </div>
                   <div className="dialog-readonly-field">
-                    <span><b>Ion / adduct</b><small>Ion / chất cộng</small></span>
+                    <span>
+                      <b>Ion / adduct</b>
+                      <small>Ion / chất cộng</small>
+                    </span>
                     <strong>{detailRow.adduct || "—"}</strong>
                   </div>
                   <div className="dialog-readonly-field">
-                    <span><b>Precursor m/z</b><small>Ion tiền chất</small></span>
+                    <span>
+                      <b>Precursor m/z</b>
+                      <small>Ion tiền chất</small>
+                    </span>
                     <strong>{detailRow.mzTsv ?? "—"}</strong>
                   </div>
                   <div className="dialog-readonly-field">
-                    <span><b>Molecular formula</b><small>Công thức phân tử</small></span>
+                    <span>
+                      <b>Molecular formula</b>
+                      <small>Công thức phân tử</small>
+                    </span>
                     <strong>{detailRow.molecularFormula || "—"}</strong>
                   </div>
                   <div className="dialog-readonly-field">
-                    <span><b>MZ error (ppm)</b><small>Sai số MZ</small></span>
+                    <span>
+                      <b>MZ error (ppm)</b>
+                      <small>Sai số MZ</small>
+                    </span>
                     <strong>{detailRow.reportedMzErrorPpm ?? "—"}</strong>
                   </div>
                   <div className="dialog-readonly-field dialog-fragments">
-                    <span><b>Fragments (m/z)</b><small>Mảnh vỡ</small></span>
+                    <span>
+                      <b>Fragments (m/z)</b>
+                      <small>Mảnh vỡ</small>
+                    </span>
                     <strong>{detailRow.fragments || "—"}</strong>
                   </div>
                 </div>
                 <div className="dialog-save-note">
                   {icons.check}
-                  <span>Chỉ tên hợp chất có thể chỉnh sửa; thay đổi được tự lưu</span>
+                  <span>
+                    Chỉ tên hợp chất có thể chỉnh sửa; thay đổi được tự lưu
+                  </span>
                 </div>
               </div>
             </motion.div>
@@ -3132,7 +3864,9 @@ export default function App() {
                       aria-valuemax={100}
                       aria-valuenow={loadingProgress?.percent ?? 0}
                     >
-                      <span style={{ width: `${loadingProgress?.percent ?? 0}%` }} />
+                      <span
+                        style={{ width: `${loadingProgress?.percent ?? 0}%` }}
+                      />
                     </div>
                   )}
                 </div>
@@ -3144,6 +3878,38 @@ export default function App() {
           </motion.div>
         )}
       </AnimatePresence>
+      {page === "results" && stage === "results" && saved.id && !chatOpen && (
+        <button className="ai-launcher" onClick={() => setChatOpen(true)}>
+          AI chat · Project
+        </button>
+      )}
+      {page === "results" && stage === "results" && chatOpen && (
+        <aside className="ai-drawer" aria-label="AI chat theo project">
+          <button
+            className="ai-drawer-close"
+            onClick={() => setChatOpen(false)}
+          >
+            Đóng chat
+          </button>
+          <ResearchWorkspace
+            compact
+            reportId={saved.id}
+            contextKey={gridSelection}
+            beforeSend={chatContext}
+            onOpenReport={openReportFromChat}
+            onCreateReport={async (projectId) => {
+              setChatOpen(false);
+              const oldReportId = saved.getId();
+              await navigate("upload");
+              pendingProject.current = { id: projectId, oldReportId };
+            }}
+            onSettings={() => {
+              setChatOpen(false);
+              void navigate("ai-settings").catch((e) => setError(e.message));
+            }}
+          />
+        </aside>
+      )}
     </WorkspaceShell>
   );
 }

@@ -3,15 +3,46 @@ import { apiUrl, jsonApi, jsonBody, apiFetch } from "../api";
 import { ModelPicker, QuotaMeter } from "./AiSettings";
 import { useConfirm } from "../Ui";
 import { Markdown } from "./Markdown";
+import { DRAFT_EVENT } from "./DiscussionDraft";
 import type {
+  Citation,
   Conversation,
   Message,
   Provider,
   ProviderQuota,
   Report,
+  TokenPreview,
   RequestState,
   Session,
 } from "./types";
+const fmtTokens = (n: number) => n.toLocaleString("vi-VN");
+const TOOL_LABELS: Record<string, string> = {
+  get_project_overview: "tổng quan project",
+  list_project_reports: "danh sách báo cáo",
+  get_report_summary: "tóm tắt báo cáo",
+  query_report_rows: "lọc dòng",
+  get_compound_details: "chi tiết hợp chất",
+  compare_reports: "so sánh báo cáo",
+  get_review_queue: "hàng đợi duyệt",
+  aggregate_report: "thống kê nhóm",
+  distribution: "phân bố",
+  find_duplicates: "tìm trùng",
+  lookup_compound: "tra cứu PubChem/NPClassifier",
+};
+type RowOverride = { reportIds: string[]; rowIds: string[] };
+interface CitationRow extends Citation {
+  reportTitle: string | null;
+  revision: number | null;
+  row: {
+    compoundName: string | null;
+    adduct: string | null;
+    mzTsv: number | null;
+    ppm: number | null;
+    rt: string | number | null;
+    status: string | null;
+    sourceTsvRow: number | null;
+  } | null;
+}
 // Sent as a normal turn: the truncated answer is in history, so the model resumes from it.
 const CONTINUE_PROMPT =
   "Tiếp tục câu trả lời trước từ đúng chỗ bị cắt, không lặp lại phần đã viết.";
@@ -28,13 +59,17 @@ export function ChatPanel({
   beforeSend,
   onOpenReport,
   compact = false,
+  contextKey,
 }: {
   session: Session;
   reports: Report[];
   providers: Provider[];
-  beforeSend: () => Promise<ChatContext>;
+  // save=false: read the current context without flushing edits (used for previews).
+  beforeSend: (options?: { save?: boolean }) => Promise<ChatContext>;
   onOpenReport: (id: string, rowIds?: string[]) => Promise<void>;
   compact?: boolean;
+  // Changes when the host's selection/report changes, so the preview refreshes.
+  contextKey?: unknown;
 }) {
   const [conversations, setConversations] = useState<Conversation[]>([]),
     [conversationSearch, setConversationSearch] = useState(""),
@@ -54,7 +89,13 @@ export function ChatPanel({
     [sourceInfo, setSourceInfo] = useState<Record<string, RequestState>>({}),
     [quotas, setQuotas] = useState<Record<string, ProviderQuota | undefined>>(
       {},
-    );
+    ),
+    [preview, setPreview] = useState<TokenPreview | null>(null),
+    [checked, setChecked] = useState<Record<string, CitationRow[]>>({}),
+    [notice, setNotice] = useState(""),
+    [feedbackDraft, setFeedbackDraft] = useState<Record<string, string>>({}),
+    [attachSpectrum, setAttachSpectrum] = useState(false),
+    [previewError, setPreviewError] = useState("");
   // Quota is shared by every chat on the provider, so re-read it after each turn.
   async function refreshQuotas() {
     try {
@@ -164,6 +205,8 @@ export function ChatPanel({
                 content: data.content,
                 citations: data.citations,
                 finish_reason: data.finishReason,
+                queue_position: data.queuePosition,
+                tool_progress: data.toolRuns.map((t) => t.tool_name),
                 status: data.state,
                 state: data.state,
                 error_message: data.error,
@@ -264,7 +307,185 @@ export function ChatPanel({
       setBusy(false);
     }
   }
-  async function send(text: string, retryOf?: string) {
+  // Shared by send and preview so both describe exactly the same request.
+  function buildPayload(
+    text: string,
+    context: ChatContext,
+    retryOf?: string,
+    rows?: RowOverride,
+  ) {
+    // A row override (citation re-check) sends exactly those rows.
+    if (rows)
+      context = { ...context, reportId: null, selectedRowIds: rows.rowIds };
+    const effectiveScope = rows ? "selection" : scope;
+    const reportIds = rows
+      ? rows.reportIds
+      : scope === "project"
+        ? chosenReports.length
+          ? chosenReports
+          : reports.map((r) => r.id)
+        : context.reportId
+          ? [context.reportId]
+          : session.active_report_id
+            ? [session.active_report_id]
+            : [];
+    if (!reportIds.length)
+      throw new Error("Hãy mở báo cáo hoặc chọn phạm vi project.");
+    if (effectiveScope === "selection" && context.selectedRowIds.length > 300)
+      throw new Error("Chọn tối đa 300 dòng hoặc chuyển sang toàn báo cáo.");
+    const expectedRevisions = Object.fromEntries(
+      reports
+        .filter((r) => reportIds.includes(r.id))
+        .map((r) => [r.id, r.revision]),
+    );
+    if (context.reportId && reportIds.includes(context.reportId))
+      expectedRevisions[context.reportId] = context.revision;
+    const [providerId, modelId] = choice.split("|");
+    return {
+      message: text,
+      // The mirror plot needs exactly one selected row.
+      ...(attachSpectrum &&
+      !rows &&
+      effectiveScope === "selection" &&
+      context.selectedRowIds.length === 1
+        ? { attachSpectrum: true }
+        : {}),
+      ...(retryOf ? { retryOf } : {}),
+      ...(choice ? { providerId, modelId } : {}),
+      context: {
+        reportIds,
+        scope: effectiveScope,
+        selectedRowIds:
+          effectiveScope === "selection" ? context.selectedRowIds : [],
+        viewState: context.viewState,
+        expectedRevisions,
+      },
+    };
+  }
+  useEffect(() => {
+    if (!conversation || isArchived || active) {
+      setPreview(null);
+      return;
+    }
+    let alive = true;
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          const payload = buildPayload(
+            question,
+            await beforeSend({ save: false }),
+          );
+          const r = await jsonApi<TokenPreview>(
+            `/api/ai/conversations/${conversation}/preview`,
+            jsonBody({
+              ...payload,
+              // Unsaved edits are flushed on send; the preview only estimates size.
+              context: { ...payload.context, expectedRevisions: {} },
+            }),
+          );
+          if (alive) {
+            setPreview(r);
+            setPreviewError("");
+          }
+        } catch (e) {
+          if (alive) {
+            setPreview(null);
+            setPreviewError((e as Error).message);
+          }
+        }
+      })();
+    }, 600);
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, [
+    conversation,
+    question,
+    scope,
+    choice,
+    chosenReports,
+    reports,
+    messages.length,
+    active,
+    contextKey,
+    attachSpectrum,
+  ]);
+  // Copies a finished answer into the report's Word draft for the user to edit.
+  async function saveAsDraft(requestId: string) {
+    const context = await beforeSend({ save: false }),
+      reportId = context.reportId ?? session.active_report_id;
+    if (!reportId)
+      throw new Error("Hãy mở báo cáo cần gắn phần Kết quả và thảo luận.");
+    await jsonApi(
+      `/api/ai/reports/${reportId}/discussion`,
+      jsonBody({ requestId }, "PUT"),
+    );
+    window.dispatchEvent(new CustomEvent(DRAFT_EVENT, { detail: reportId }));
+    setNotice(
+      "Đã lưu làm nháp “Kết quả và thảo luận”. Hãy đọc và sửa ở mục nháp trước khi xuất Word.",
+    );
+  }
+  // Clicking the active rating again (without a comment) clears it.
+  async function rate(m: Message, rating: 1 | -1, comment = "") {
+    const clear = m.feedback_rating === rating && !comment;
+    await jsonApi(
+      `/api/ai/requests/${m.request_id}/feedback`,
+      clear ? jsonBody({}, "DELETE") : jsonBody({ rating, comment }, "PUT"),
+    );
+    setMessages((prev) =>
+      prev.map((x) =>
+        x.id === m.id
+          ? {
+              ...x,
+              feedback_rating: clear ? null : rating,
+              feedback_comment: clear ? null : comment,
+            }
+          : x,
+      ),
+    );
+  }
+  async function loadCitations(requestId: string) {
+    const rows = await jsonApi<CitationRow[]>(
+      `/api/ai/requests/${requestId}/citations`,
+    );
+    setChecked((prev) => ({ ...prev, [requestId]: rows }));
+    return rows;
+  }
+  // Sends only the rows behind questionable citations, named by compound
+  // because refs are renumbered in the new snapshot.
+  async function recheck(requestId: string) {
+    const rows = checked[requestId] ?? (await loadCitations(requestId)),
+      bad = rows.filter((c) => c.status !== "ok"),
+      withRow = bad.filter((c) => c.reportId && c.rowId);
+    const names = withRow.map(
+      (c) =>
+        `${c.row?.compoundName ?? c.ref}${c.row?.sourceTsvRow ? ` (dòng TSV ${c.row.sourceTsvRow})` : ""}`,
+    );
+    const invalid = bad
+      .filter((c) => !c.rowId && !c.reportId)
+      .map((c) => c.ref);
+    const text = [
+      names.length &&
+        `Kiểm tra lại số liệu câu trả lời trước về: ${names.join(", ")}, dựa trên dữ liệu các dòng được gửi kèm; xác nhận hoặc sửa từng số liệu và trích dẫn bằng mã mới.`,
+      invalid.length &&
+        `Các mã ${invalid.join(", ")} không tồn tại: bỏ hoặc sửa các kết luận dùng các mã này.`,
+    ]
+      .filter(Boolean)
+      .join(" ");
+    if (!text) return;
+    await send(
+      text,
+      undefined,
+      withRow.length
+        ? {
+            reportIds: [...new Set(withRow.map((c) => c.reportId!))],
+            rowIds: [...new Set(withRow.map((c) => c.rowId!))],
+          }
+        : undefined,
+    );
+  }
+  async function send(text: string, retryOf?: string, rows?: RowOverride) {
     if (
       sending.current ||
       active ||
@@ -280,40 +501,7 @@ export function ChatPanel({
     try {
       const context = await beforeSend();
       if (generation.current !== gen) return;
-      const reportIds =
-        scope === "project"
-          ? chosenReports.length
-            ? chosenReports
-            : reports.map((r) => r.id)
-          : context.reportId
-            ? [context.reportId]
-            : session.active_report_id
-              ? [session.active_report_id]
-              : [];
-      if (!reportIds.length)
-        throw new Error("Hãy mở báo cáo hoặc chọn phạm vi project.");
-      if (scope === "selection" && context.selectedRowIds.length > 300)
-        throw new Error("Chọn tối đa 300 dòng hoặc chuyển sang toàn báo cáo.");
-      const expectedRevisions = Object.fromEntries(
-        reports
-          .filter((r) => reportIds.includes(r.id))
-          .map((r) => [r.id, r.revision]),
-      );
-      if (context.reportId && reportIds.includes(context.reportId))
-        expectedRevisions[context.reportId] = context.revision;
-      const [providerId, modelId] = choice.split("|"),
-        payload = {
-          message: text,
-          ...(retryOf ? { retryOf } : {}),
-          ...(choice ? { providerId, modelId } : {}),
-          context: {
-            reportIds,
-            scope,
-            selectedRowIds: scope === "selection" ? context.selectedRowIds : [],
-            viewState: context.viewState,
-            expectedRevisions,
-          },
-        },
+      const payload = buildPayload(text, context, retryOf, rows),
         signature = JSON.stringify(payload);
       if (!pending.current || pending.current.signature !== signature)
         pending.current = { id: crypto.randomUUID(), signature };
@@ -324,6 +512,7 @@ export function ChatPanel({
       pending.current = null;
       if (generation.current !== gen) return;
       setQuestion("");
+      setAttachSpectrum(false);
       const loaded = await loadMessages(conversation);
       if (generation.current !== gen) return;
       setMessages(loaded.items);
@@ -552,6 +741,11 @@ export function ChatPanel({
           {error}
         </p>
       )}
+      {notice && (
+        <p className="ai-notice" role="status">
+          {notice}
+        </p>
+      )}
       <div className="chat-messages" role="log" aria-label="Tin nhắn">
         <button
           hidden={!cursor}
@@ -577,11 +771,13 @@ export function ChatPanel({
             <h3>Hỏi về dữ liệu nghiên cứu của bạn</h3>
             <p>Tạo hội thoại, chọn model và đặt câu hỏi về báo cáo.</p>
             <div className="ai-actions">
-              {[
-                "Tóm tắt kết quả báo cáo",
-                "Tìm các dòng có sai số ppm lớn",
-                "So sánh các báo cáo đã chọn",
-              ].map((q) => (
+              {(
+                preview?.suggestions ?? [
+                  "Tóm tắt kết quả báo cáo",
+                  "Tìm các dòng có sai số ppm lớn",
+                  "So sánh các báo cáo đã chọn",
+                ]
+              ).map((q) => (
                 <button key={q} onClick={() => setQuestion(q)}>
                   {q}
                 </button>
@@ -593,6 +789,15 @@ export function ChatPanel({
           <article key={m.id} className={`chat-message ${m.role}`}>
             <header>
               {m.role === "user" ? "Bạn" : `${m.provider_name} · ${m.model_id}`}{" "}
+              {m.role === "user" &&
+                m.attachments?.some((x) => x.type === "mirror_plot") && (
+                  <small>
+                    📈 kèm mirror plot
+                    {m.attachments[0].compoundName
+                      ? ` · ${m.attachments[0].compoundName}`
+                      : ""}
+                  </small>
+                )}
               {m.role === "assistant" && (
                 <small>
                   {(
@@ -605,6 +810,9 @@ export function ChatPanel({
                       interrupted: "gián đoạn",
                     } as Record<string, string>
                   )[m.status] ?? m.status}
+                  {m.status === "queued" && m.queue_position
+                    ? ` · vị trí ${m.queue_position} trong hàng đợi`
+                    : ""}
                 </small>
               )}
             </header>
@@ -623,18 +831,86 @@ export function ChatPanel({
                   }
                 />
               ) : (
-                m.content || "Đang xử lý dữ liệu…"
+                m.content ||
+                (m.tool_progress?.length
+                  ? `Đang tra dữ liệu: ${m.tool_progress.map((t) => TOOL_LABELS[t] ?? t).join(" → ")}…`
+                  : "Đang xử lý dữ liệu…")
               )}
             </div>
             {m.role === "assistant" &&
               m.citations?.some((c) => c.status !== "ok") && (
-                <p className="citation-warning">
-                  ⚠ {m.citations.filter((c) => c.status === "invalid").length}{" "}
-                  mã nguồn không tồn tại,{" "}
-                  {m.citations.filter((c) => c.status === "unseen").length} mã
-                  trỏ tới dòng AI chưa được xem. Hãy kiểm tra lại các số liệu
-                  liên quan.
-                </p>
+                <div className="citation-warning">
+                  <p>
+                    ⚠ {m.citations.filter((c) => c.status === "invalid").length}{" "}
+                    mã nguồn không tồn tại,{" "}
+                    {m.citations.filter((c) => c.status === "unseen").length} mã
+                    trỏ tới dòng AI chưa được xem. Hãy kiểm tra lại các số liệu
+                    liên quan.
+                  </p>
+                  <div className="ai-actions">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        checked[m.request_id]
+                          ? setChecked(({ [m.request_id]: _, ...rest }) => rest)
+                          : void loadCitations(m.request_id).catch((e) =>
+                              setError(e.message),
+                            )
+                      }
+                    >
+                      {checked[m.request_id] ? "Ẩn số liệu gốc" : "Kiểm chứng"}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy || active || isArchived}
+                      onClick={() =>
+                        void recheck(m.request_id).catch((e) =>
+                          setError(e.message),
+                        )
+                      }
+                    >
+                      Nhờ AI kiểm tra lại
+                    </button>
+                  </div>
+                  {checked[m.request_id] && (
+                    <div className="md-table">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>Mã</th>
+                            <th>Nguồn</th>
+                            <th>Hợp chất</th>
+                            <th>ppm</th>
+                            <th>RT</th>
+                            <th>Trạng thái</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {checked[m.request_id]
+                            .filter((c) => c.status !== "ok")
+                            .map((c) => (
+                              <tr key={c.ref}>
+                                <td>{c.ref}</td>
+                                <td>
+                                  {c.status === "invalid"
+                                    ? "Không tồn tại"
+                                    : `${c.reportTitle ?? ""}${c.row?.sourceTsvRow ? ` · dòng TSV ${c.row.sourceTsvRow}` : ""}`}
+                                </td>
+                                <td>{c.row?.compoundName ?? "—"}</td>
+                                <td>{c.row?.ppm ?? "—"}</td>
+                                <td>{c.row?.rt ?? "—"}</td>
+                                <td>{c.row?.status ?? "—"}</td>
+                              </tr>
+                            ))}
+                        </tbody>
+                      </table>
+                      <small>
+                        Số liệu lấy từ snapshot của lượt trả lời này (không gọi
+                        AI).
+                      </small>
+                    </div>
+                  )}
+                </div>
               )}
             {m.error_message && m.role === "assistant" && (
               <p className="ai-error">{m.error_message}</p>
@@ -649,6 +925,49 @@ export function ChatPanel({
                 <button onClick={() => void sources(m.request_id)}>
                   Nguồn dữ liệu & token
                 </button>
+                {m.status === "completed" && m.content && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void saveAsDraft(m.request_id).catch((e) =>
+                        setError(e.message),
+                      )
+                    }
+                  >
+                    Dùng làm nháp thảo luận
+                  </button>
+                )}
+                {m.status === "completed" && m.content && (
+                  <>
+                    <button
+                      type="button"
+                      className="feedback-button"
+                      aria-pressed={m.feedback_rating === 1}
+                      aria-label="Câu trả lời hữu ích"
+                      onClick={() =>
+                        void rate(m, 1).catch((e) => setError(e.message))
+                      }
+                    >
+                      👍
+                    </button>
+                    <button
+                      type="button"
+                      className="feedback-button"
+                      aria-pressed={m.feedback_rating === -1}
+                      aria-label="Câu trả lời chưa đúng"
+                      onClick={() =>
+                        m.feedback_rating === -1
+                          ? void rate(m, -1).catch((e) => setError(e.message))
+                          : setFeedbackDraft((prev) => ({
+                              ...prev,
+                              [m.request_id]: prev[m.request_id] ?? "",
+                            }))
+                      }
+                    >
+                      👎
+                    </button>
+                  </>
+                )}
                 {m.finish_reason === "length" &&
                   index === messages.length - 1 && (
                     <button
@@ -674,6 +993,47 @@ export function ChatPanel({
                   </button>
                 )}
               </div>
+            )}
+            {/* The question and its answer share request_id; feedback belongs to the answer. */}
+            {m.role === "assistant" && m.request_id in feedbackDraft && (
+              <form
+                className="feedback-form"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void rate(m, -1, feedbackDraft[m.request_id])
+                    .then(() =>
+                      setFeedbackDraft(
+                        ({ [m.request_id]: _, ...rest }) => rest,
+                      ),
+                    )
+                    .catch((err) => setError(err.message));
+                }}
+              >
+                <label>
+                  Điều gì chưa đúng? (không bắt buộc)
+                  <textarea
+                    maxLength={1000}
+                    value={feedbackDraft[m.request_id]}
+                    onChange={(e) =>
+                      setFeedbackDraft((prev) => ({
+                        ...prev,
+                        [m.request_id]: e.target.value,
+                      }))
+                    }
+                  />
+                </label>
+                <div className="ai-actions">
+                  <button type="submit">Gửi góp ý</button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setFeedbackDraft(({ [m.request_id]: _, ...rest }) => rest)
+                    }
+                  >
+                    Hủy
+                  </button>
+                </div>
+              </form>
             )}
             {m.role === "assistant" && sourceInfo[m.request_id] && (
               <details className="chat-sources" open>
@@ -708,8 +1068,11 @@ export function ChatPanel({
                   vào /{" "}
                   {sourceInfo[m.request_id].usage.output_tokens ??
                     "không xác định"}{" "}
-                  ra · {sourceInfo[m.request_id].toolRuns.length} truy vấn dữ
-                  liệu
+                  ra
+                  {sourceInfo[m.request_id].usage.cached_input_tokens
+                    ? ` (provider báo ${sourceInfo[m.request_id].usage.cached_input_tokens} token vào lấy từ cache)`
+                    : ""}{" "}
+                  · {sourceInfo[m.request_id].toolRuns.length} truy vấn dữ liệu
                 </small>
                 {sourceInfo[m.request_id].contextInfo && (
                   <small>
@@ -751,6 +1114,89 @@ export function ChatPanel({
             placeholder="Nhập câu hỏi về báo cáo…"
           />
         </label>
+        {!question.trim() &&
+          messages.length > 0 &&
+          !!preview?.suggestions.length && (
+            <div className="ai-actions suggestion-chips">
+              {preview.suggestions.map((q) => (
+                <button type="button" key={q} onClick={() => setQuestion(q)}>
+                  {q}
+                </button>
+              ))}
+            </div>
+          )}
+        {preview?.supportsVision && (
+          <label className="ai-check attach-spectrum">
+            <input
+              type="checkbox"
+              checked={attachSpectrum}
+              disabled={scope !== "selection" || preview.rows.examined !== 1}
+              onChange={(e) => setAttachSpectrum(e.target.checked)}
+            />
+            Kèm ảnh mirror plot của dòng đang chọn (~
+            {fmtTokens(1100)} token)
+          </label>
+        )}
+        {preview && (
+          <p className="send-scope">
+            Sẽ gửi:{" "}
+            {scope === "selection" &&
+            preview.rows.examined <
+              preview.reports.reduce((n, r) => n + r.rowCount, 0)
+              ? `${preview.rows.examined} dòng đang chọn`
+              : scope === "project"
+                ? `${preview.reports.length} báo cáo trong project`
+                : "toàn báo cáo"}{" "}
+            ·{" "}
+            {preview.reports
+              .map((r) => `${r.title} (revision ${r.revision})`)
+              .join(", ")}
+          </p>
+        )}
+        {preview ? (
+          <details className={`token-preview${preview.fits ? "" : " blocked"}`}>
+            <summary>
+              Dự toán ~{fmtTokens(preview.input)} token vào · tối đa{" "}
+              {fmtTokens(preview.outputMax)} ra · giữ chỗ ~
+              {fmtTokens(preview.reserve)}
+              {preview.toolRounds && " (+ mỗi vòng công cụ)"}
+            </summary>
+            <ul>
+              <li>Hướng dẫn: ~{fmtTokens(preview.breakdown.instructions)}</li>
+              <li>
+                Dữ liệu: ~{fmtTokens(preview.breakdown.data)} ·{" "}
+                {preview.rows.sent}/{preview.rows.examined} dòng
+                {preview.rows.truncated ? " (đã rút gọn)" : ""}
+              </li>
+              <li>
+                Lịch sử: ~{fmtTokens(preview.breakdown.history)} ·{" "}
+                {preview.history.included / 2} lượt gần nhất
+                {preview.history.omitted
+                  ? `, ${preview.history.omitted / 2} lượt cũ chỉ còn trích đoạn`
+                  : ""}
+              </li>
+              <li>Câu hỏi: ~{fmtTokens(preview.breakdown.question)}</li>
+              {preview.toolRounds && (
+                <li>Mô tả công cụ: ~{fmtTokens(preview.breakdown.tools)}</li>
+              )}
+            </ul>
+            <small>
+              Ước tính{" "}
+              {preview.calibrated
+                ? "đã hiệu chỉnh theo usage thật của model"
+                : "chưa hiệu chỉnh (model chưa có lượt nào có usage)"}
+              ; số thật lấy từ provider sau khi trả lời.
+            </small>
+          </details>
+        ) : (
+          previewError &&
+          conversation && (
+            <small className="token-preview">{previewError}</small>
+          )
+        )}
+        {preview && !preview.fits && (
+          <p className="ai-error">{preview.reason}</p>
+        )}
         <div className="ai-actions">
           <button
             disabled={
@@ -759,7 +1205,8 @@ export function ChatPanel({
               active ||
               isArchived ||
               session.status === "closed" ||
-              !question.trim()
+              !question.trim() ||
+              preview?.fits === false
             }
             type="submit"
           >
