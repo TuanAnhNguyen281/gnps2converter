@@ -1838,6 +1838,52 @@ export function researchRouter(
       res.json(await requestState(req.params.id as string, owner(req)));
     }),
   );
+  // Rows behind an answer's citations, from that request's immutable snapshot,
+  // so the user can check the numbers without another model call.
+  router.get(
+    "/ai/requests/:id/citations",
+    route(async (req, res) => {
+      const user = owner(req),
+        r = await owned("ai_requests", req.params.id as string, user),
+        m = (
+          await db.query(
+            "SELECT citations FROM ai_messages WHERE request_id=$1 AND role='assistant'",
+            [r.id],
+          )
+        ).rows[0],
+        snapshot = (
+          await db.query(
+            "SELECT payload FROM ai_context_snapshots WHERE id=$1 AND owner_id=$2",
+            [r.context_snapshot_id, user],
+          )
+        ).rows[0];
+      const reports: any[] = snapshot?.payload.reports ?? [];
+      res.json(
+        ((m?.citations ?? []) as any[]).map((c) => {
+          const report = reports.find((x) => x.id === c.reportId),
+            row = c.rowId
+              ? report?.rows.find((x: any) => x.id === c.rowId)
+              : undefined;
+          return {
+            ...c,
+            reportTitle: report?.title ?? null,
+            revision: report?.revision ?? null,
+            row: row
+              ? {
+                  compoundName: row.compoundName,
+                  adduct: row.adduct,
+                  mzTsv: row.mzTsv,
+                  ppm: row.reportedMzErrorPpm ?? row.deltaPpm,
+                  rt: row.rtDisplay ?? row.rtData,
+                  status: row.status,
+                  sourceTsvRow: row.sourceTsvRow,
+                }
+              : null,
+          };
+        }),
+      );
+    }),
+  );
   router.post(
     "/ai/requests/:id/cancel",
     route(async (req, res) => {

@@ -668,6 +668,21 @@ describe("Research project, provider and persistent chat", () => {
       (m: any) => m.request_id === r.body.requestId && m.role === "assistant",
     );
     expect(listed.citations).toHaveLength(2);
+    const rows = (await a.get(`/api/ai/requests/${r.body.requestId}/citations`))
+      .body;
+    expect(rows[0]).toMatchObject({
+      ref: "R1-1",
+      status: "ok",
+      row: { compoundName: "Compound A", ppm: 8, sourceTsvRow: 1 },
+    });
+    expect(rows[1]).toMatchObject({
+      ref: "R1-9",
+      status: "invalid",
+      row: null,
+    });
+    expect(
+      (await b.get(`/api/ai/requests/${r.body.requestId}/citations`)).status,
+    ).toBe(404);
     await post(`/api/ai/providers/${providerId}/models`, {
       modelId: "test-model",
     });

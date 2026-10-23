@@ -4,6 +4,7 @@ import { ModelPicker, QuotaMeter } from "./AiSettings";
 import { useConfirm } from "../Ui";
 import { Markdown } from "./Markdown";
 import type {
+  Citation,
   Conversation,
   Message,
   Provider,
@@ -14,6 +15,20 @@ import type {
   Session,
 } from "./types";
 const fmtTokens = (n: number) => n.toLocaleString("vi-VN");
+type RowOverride = { reportIds: string[]; rowIds: string[] };
+interface CitationRow extends Citation {
+  reportTitle: string | null;
+  revision: number | null;
+  row: {
+    compoundName: string | null;
+    adduct: string | null;
+    mzTsv: number | null;
+    ppm: number | null;
+    rt: string | number | null;
+    status: string | null;
+    sourceTsvRow: number | null;
+  } | null;
+}
 // Sent as a normal turn: the truncated answer is in history, so the model resumes from it.
 const CONTINUE_PROMPT =
   "Tiếp tục câu trả lời trước từ đúng chỗ bị cắt, không lặp lại phần đã viết.";
@@ -62,6 +77,7 @@ export function ChatPanel({
       {},
     ),
     [preview, setPreview] = useState<TokenPreview | null>(null),
+    [checked, setChecked] = useState<Record<string, CitationRow[]>>({}),
     [previewError, setPreviewError] = useState("");
   // Quota is shared by every chat on the provider, so re-read it after each turn.
   async function refreshQuotas() {
@@ -273,9 +289,19 @@ export function ChatPanel({
     }
   }
   // Shared by send and preview so both describe exactly the same request.
-  function buildPayload(text: string, context: ChatContext, retryOf?: string) {
-    const reportIds =
-      scope === "project"
+  function buildPayload(
+    text: string,
+    context: ChatContext,
+    retryOf?: string,
+    rows?: RowOverride,
+  ) {
+    // A row override (citation re-check) sends exactly those rows.
+    if (rows)
+      context = { ...context, reportId: null, selectedRowIds: rows.rowIds };
+    const effectiveScope = rows ? "selection" : scope;
+    const reportIds = rows
+      ? rows.reportIds
+      : scope === "project"
         ? chosenReports.length
           ? chosenReports
           : reports.map((r) => r.id)
@@ -286,7 +312,7 @@ export function ChatPanel({
             : [];
     if (!reportIds.length)
       throw new Error("Hãy mở báo cáo hoặc chọn phạm vi project.");
-    if (scope === "selection" && context.selectedRowIds.length > 300)
+    if (effectiveScope === "selection" && context.selectedRowIds.length > 300)
       throw new Error("Chọn tối đa 300 dòng hoặc chuyển sang toàn báo cáo.");
     const expectedRevisions = Object.fromEntries(
       reports
@@ -302,8 +328,9 @@ export function ChatPanel({
       ...(choice ? { providerId, modelId } : {}),
       context: {
         reportIds,
-        scope,
-        selectedRowIds: scope === "selection" ? context.selectedRowIds : [],
+        scope: effectiveScope,
+        selectedRowIds:
+          effectiveScope === "selection" ? context.selectedRowIds : [],
         viewState: context.viewState,
         expectedRevisions,
       },
@@ -357,7 +384,47 @@ export function ChatPanel({
     active,
     contextKey,
   ]);
-  async function send(text: string, retryOf?: string) {
+  async function loadCitations(requestId: string) {
+    const rows = await jsonApi<CitationRow[]>(
+      `/api/ai/requests/${requestId}/citations`,
+    );
+    setChecked((prev) => ({ ...prev, [requestId]: rows }));
+    return rows;
+  }
+  // Sends only the rows behind questionable citations, named by compound
+  // because refs are renumbered in the new snapshot.
+  async function recheck(requestId: string) {
+    const rows = checked[requestId] ?? (await loadCitations(requestId)),
+      bad = rows.filter((c) => c.status !== "ok"),
+      withRow = bad.filter((c) => c.reportId && c.rowId);
+    const names = withRow.map(
+      (c) =>
+        `${c.row?.compoundName ?? c.ref}${c.row?.sourceTsvRow ? ` (dòng TSV ${c.row.sourceTsvRow})` : ""}`,
+    );
+    const invalid = bad
+      .filter((c) => !c.rowId && !c.reportId)
+      .map((c) => c.ref);
+    const text = [
+      names.length &&
+        `Kiểm tra lại số liệu câu trả lời trước về: ${names.join(", ")}, dựa trên dữ liệu các dòng được gửi kèm; xác nhận hoặc sửa từng số liệu và trích dẫn bằng mã mới.`,
+      invalid.length &&
+        `Các mã ${invalid.join(", ")} không tồn tại: bỏ hoặc sửa các kết luận dùng các mã này.`,
+    ]
+      .filter(Boolean)
+      .join(" ");
+    if (!text) return;
+    await send(
+      text,
+      undefined,
+      withRow.length
+        ? {
+            reportIds: [...new Set(withRow.map((c) => c.reportId!))],
+            rowIds: [...new Set(withRow.map((c) => c.rowId!))],
+          }
+        : undefined,
+    );
+  }
+  async function send(text: string, retryOf?: string, rows?: RowOverride) {
     if (
       sending.current ||
       active ||
@@ -373,7 +440,7 @@ export function ChatPanel({
     try {
       const context = await beforeSend();
       if (generation.current !== gen) return;
-      const payload = buildPayload(text, context, retryOf),
+      const payload = buildPayload(text, context, retryOf, rows),
         signature = JSON.stringify(payload);
       if (!pending.current || pending.current.signature !== signature)
         pending.current = { id: crypto.randomUUID(), signature };
@@ -690,13 +757,78 @@ export function ChatPanel({
             </div>
             {m.role === "assistant" &&
               m.citations?.some((c) => c.status !== "ok") && (
-                <p className="citation-warning">
-                  ⚠ {m.citations.filter((c) => c.status === "invalid").length}{" "}
-                  mã nguồn không tồn tại,{" "}
-                  {m.citations.filter((c) => c.status === "unseen").length} mã
-                  trỏ tới dòng AI chưa được xem. Hãy kiểm tra lại các số liệu
-                  liên quan.
-                </p>
+                <div className="citation-warning">
+                  <p>
+                    ⚠ {m.citations.filter((c) => c.status === "invalid").length}{" "}
+                    mã nguồn không tồn tại,{" "}
+                    {m.citations.filter((c) => c.status === "unseen").length} mã
+                    trỏ tới dòng AI chưa được xem. Hãy kiểm tra lại các số liệu
+                    liên quan.
+                  </p>
+                  <div className="ai-actions">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        checked[m.request_id]
+                          ? setChecked(({ [m.request_id]: _, ...rest }) => rest)
+                          : void loadCitations(m.request_id).catch((e) =>
+                              setError(e.message),
+                            )
+                      }
+                    >
+                      {checked[m.request_id] ? "Ẩn số liệu gốc" : "Kiểm chứng"}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy || active || isArchived}
+                      onClick={() =>
+                        void recheck(m.request_id).catch((e) =>
+                          setError(e.message),
+                        )
+                      }
+                    >
+                      Nhờ AI kiểm tra lại
+                    </button>
+                  </div>
+                  {checked[m.request_id] && (
+                    <div className="md-table">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>Mã</th>
+                            <th>Nguồn</th>
+                            <th>Hợp chất</th>
+                            <th>ppm</th>
+                            <th>RT</th>
+                            <th>Trạng thái</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {checked[m.request_id]
+                            .filter((c) => c.status !== "ok")
+                            .map((c) => (
+                              <tr key={c.ref}>
+                                <td>{c.ref}</td>
+                                <td>
+                                  {c.status === "invalid"
+                                    ? "Không tồn tại"
+                                    : `${c.reportTitle ?? ""}${c.row?.sourceTsvRow ? ` · dòng TSV ${c.row.sourceTsvRow}` : ""}`}
+                                </td>
+                                <td>{c.row?.compoundName ?? "—"}</td>
+                                <td>{c.row?.ppm ?? "—"}</td>
+                                <td>{c.row?.rt ?? "—"}</td>
+                                <td>{c.row?.status ?? "—"}</td>
+                              </tr>
+                            ))}
+                        </tbody>
+                      </table>
+                      <small>
+                        Số liệu lấy từ snapshot của lượt trả lời này (không gọi
+                        AI).
+                      </small>
+                    </div>
+                  )}
+                </div>
               )}
             {m.error_message && m.role === "assistant" && (
               <p className="ai-error">{m.error_message}</p>
