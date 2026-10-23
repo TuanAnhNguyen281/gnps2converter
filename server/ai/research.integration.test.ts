@@ -3,6 +3,7 @@ import { PGlite } from "@electric-sql/pglite";
 import supertest from "supertest";
 import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import JSZip from "jszip";
 import type pg from "pg";
 import type { Database, Query } from "../db/index.js";
 import { readConfig } from "../config.js";
@@ -263,6 +264,7 @@ beforeAll(async () => {
     "0004_ai_citations.sql",
     "0005_ai_quota_truncation.sql",
     "0006_ai_token_estimate.sql",
+    "0007_ai_report_drafts.sql",
   ])
     await sql.exec(
       await readFile(
@@ -930,6 +932,59 @@ describe("Research project, provider and persistent chat", () => {
       .set("X-CSRF-Token", csrfA)
       .send({ monthlyTokenLimit: null, dailyTokenLimit: null });
     expect((await send()).status).toBe(202);
+  });
+  it("keeps a reviewed discussion draft and appends it to the Word export", async () => {
+    const answer = (
+      await a.get(`/api/ai/conversations/${conversationId}/messages`)
+    ).body.items.find(
+      (m: any) => m.role === "assistant" && m.citations?.length,
+    );
+    const fromChat = await a
+      .put(`/api/ai/reports/${reportId}/discussion`)
+      .set("X-CSRF-Token", csrfA)
+      .send({ requestId: answer.request_id });
+    expect(fromChat.status).toBe(200);
+    expect(fromChat.body.content).not.toContain("[R1-1]");
+    expect(fromChat.body.content).toContain("R1-9 (không tồn tại)");
+    expect(fromChat.body.content).toContain("dòng TSV 1");
+    const edited = await a
+      .put(`/api/ai/reports/${reportId}/discussion`)
+      .set("X-CSRF-Token", csrfA)
+      .send({ content: "## Nhận xét\n- **Compound A** khớp tốt <b>x</b>" });
+    expect(edited.status).toBe(200);
+    expect((await b.get(`/api/ai/reports/${reportId}/discussion`)).status).toBe(
+      404,
+    );
+    const revision = (await a.get(`/api/reports/${reportId}`)).body.revision;
+    const docx = await a
+      .post(`/api/reports/${reportId}/export/docx`)
+      .set("X-CSRF-Token", csrfA)
+      .send({ revision })
+      .buffer(true)
+      .parse((res, done) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (c: Buffer) => chunks.push(c));
+        res.on("end", () => done(null, Buffer.concat(chunks)));
+      });
+    expect(docx.status).toBe(200);
+    const xml = await (
+      await JSZip.loadAsync(docx.body)
+    )
+      .file("word/document.xml")!
+      .async("string");
+    expect(xml).toContain("KẾT QUẢ VÀ THẢO LUẬN");
+    expect(xml).toContain("Compound A");
+    expect(xml).toContain("&lt;b&gt;x&lt;/b&gt;");
+    expect(
+      (
+        await a
+          .delete(`/api/ai/reports/${reportId}/discussion`)
+          .set("X-CSRF-Token", csrfA)
+      ).status,
+    ).toBe(204);
+    expect(
+      (await a.get(`/api/ai/reports/${reportId}/discussion`)).body,
+    ).toBeNull();
   });
   it("serves the server-side review queue only to the report owner", async () => {
     const q = await a.get(`/api/ai/reports/${reportId}/review-queue?limit=5`);

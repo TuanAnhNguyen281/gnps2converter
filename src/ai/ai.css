@@ -629,3 +629,19 @@
   display: block;
   color: var(--muted, #5b6b7f);
 }
+.discussion-draft summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.discussion-draft textarea {
+  width: 100%;
+  min-height: 180px;
+  margin: 10px 0 6px;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.55;
+}
+.discussion-draft small {
+  display: block;
+  color: var(--muted, #5b6b7f);
+}

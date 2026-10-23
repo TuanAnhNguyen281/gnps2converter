@@ -919,6 +919,83 @@ export function researchRouter(
       res.json({ conversation: c, messages, sources });
     }),
   );
+  // Reviewed "Kết quả và thảo luận" draft attached to a report's Word export.
+  async function ownedReport(user: string, id: string) {
+    const r = (
+      await db.query("SELECT id FROM reports WHERE id=$1 AND owner_id=$2", [
+        uuid.parse(id),
+        user,
+      ])
+    ).rows[0];
+    if (!r) throw new ApiError(404, "Không tìm thấy báo cáo.");
+    return r.id as string;
+  }
+  router.get(
+    "/ai/reports/:id/discussion",
+    route(async (req, res) => {
+      const id = await ownedReport(owner(req), req.params.id as string);
+      res.json(
+        (
+          await db.query(
+            "SELECT content,source_request_id,updated_at FROM ai_report_drafts WHERE report_id=$1",
+            [id],
+          )
+        ).rows[0] ?? null,
+      );
+    }),
+  );
+  router.put(
+    "/ai/reports/:id/discussion",
+    route(async (req, res) => {
+      const user = owner(req),
+        id = await ownedReport(user, req.params.id as string),
+        b = z
+          .union([
+            z.object({ requestId: uuid }).strict(),
+            z.object({ content: z.string().trim().min(1).max(20000) }).strict(),
+          ])
+          .parse(req.body);
+      let content: string,
+        source: string | null = null;
+      if ("requestId" in b) {
+        // Start from a chat answer, with citations spelled out for the document.
+        const r = await owned("ai_requests", b.requestId, user),
+          m = (
+            await db.query(
+              "SELECT content,citations,status FROM ai_messages WHERE request_id=$1 AND role='assistant'",
+              [r.id],
+            )
+          ).rows[0],
+          snapshot = (
+            await db.query(
+              "SELECT payload FROM ai_context_snapshots WHERE id=$1 AND owner_id=$2",
+              [r.context_snapshot_id, user],
+            )
+          ).rows[0];
+        if (!m || m.status !== "completed" || !m.content.trim())
+          throw new ApiError(400, "Chỉ dùng được câu trả lời đã hoàn tất.");
+        content = readableCitations(
+          m.content,
+          m.citations,
+          snapshot?.payload.reports ?? [],
+        ).slice(0, 20000);
+        source = r.id;
+      } else content = b.content;
+      await db.query(
+        "INSERT INTO ai_report_drafts(report_id,owner_id,content,source_request_id) VALUES($1,$2,$3,$4) ON CONFLICT(report_id) DO UPDATE SET content=EXCLUDED.content,source_request_id=COALESCE(EXCLUDED.source_request_id,ai_report_drafts.source_request_id),updated_at=now()",
+        [id, user, content, source],
+      );
+      res.json({ content, source_request_id: source });
+    }),
+  );
+  router.delete(
+    "/ai/reports/:id/discussion",
+    route(async (req, res) => {
+      const id = await ownedReport(owner(req), req.params.id as string);
+      await db.query("DELETE FROM ai_report_drafts WHERE report_id=$1", [id]);
+      res.sendStatus(204);
+    }),
+  );
   // Server-computed review ranking for one report; no provider call.
   router.get(
     "/ai/reports/:id/review-queue",

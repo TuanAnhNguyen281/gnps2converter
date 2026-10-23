@@ -5,6 +5,7 @@ import { useConfirm } from "../Ui";
 import { ChatPanel, type ChatContext } from "./ChatPanel";
 import { ModelPicker } from "./AiSettings";
 import { ReviewQueue } from "./ReviewQueue";
+import { DiscussionDraft } from "./DiscussionDraft";
 import type { Project, Provider, Report, Session } from "./types";
 export function ResearchWorkspace({
   reportId,
@@ -551,6 +552,7 @@ export function ResearchWorkspace({
               }
             />
           )}
+          {reportId && <DiscussionDraft reportId={reportId} />}
           {session && project && !project.archived_at ? (
             <ChatPanel
               key={session.id}

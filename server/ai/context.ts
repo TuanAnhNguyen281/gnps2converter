@@ -967,7 +967,10 @@ export function suggestQuestions(ctx: ResearchContext) {
   if (unmatched) out.push(`${unmatched} dòng chưa khớp: nên kiểm tra gì?`);
   if (ctx.reports.length >= 2)
     out.push(`So sánh ${ctx.reports[0].title} và ${ctx.reports[1].title}`);
-  out.push("Dòng nào nên duyệt lại trước?", "Tóm tắt kết quả báo cáo");
+  out.push(
+    "Dòng nào nên duyệt lại trước?",
+    "Soạn nháp mục Kết quả và thảo luận cho báo cáo",
+  );
   return [...new Set(out)].slice(0, 4);
 }
 // One owned report with normalized rows, outside any research session.

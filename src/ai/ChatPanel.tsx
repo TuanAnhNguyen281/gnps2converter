@@ -3,6 +3,7 @@ import { apiUrl, jsonApi, jsonBody, apiFetch } from "../api";
 import { ModelPicker, QuotaMeter } from "./AiSettings";
 import { useConfirm } from "../Ui";
 import { Markdown } from "./Markdown";
+import { DRAFT_EVENT } from "./DiscussionDraft";
 import type {
   Citation,
   Conversation,
@@ -78,6 +79,7 @@ export function ChatPanel({
     ),
     [preview, setPreview] = useState<TokenPreview | null>(null),
     [checked, setChecked] = useState<Record<string, CitationRow[]>>({}),
+    [notice, setNotice] = useState(""),
     [previewError, setPreviewError] = useState("");
   // Quota is shared by every chat on the provider, so re-read it after each turn.
   async function refreshQuotas() {
@@ -384,6 +386,21 @@ export function ChatPanel({
     active,
     contextKey,
   ]);
+  // Copies a finished answer into the report's Word draft for the user to edit.
+  async function saveAsDraft(requestId: string) {
+    const context = await beforeSend({ save: false }),
+      reportId = context.reportId ?? session.active_report_id;
+    if (!reportId)
+      throw new Error("Hãy mở báo cáo cần gắn phần Kết quả và thảo luận.");
+    await jsonApi(
+      `/api/ai/reports/${reportId}/discussion`,
+      jsonBody({ requestId }, "PUT"),
+    );
+    window.dispatchEvent(new CustomEvent(DRAFT_EVENT, { detail: reportId }));
+    setNotice(
+      "Đã lưu làm nháp “Kết quả và thảo luận”. Hãy đọc và sửa ở mục nháp trước khi xuất Word.",
+    );
+  }
   async function loadCitations(requestId: string) {
     const rows = await jsonApi<CitationRow[]>(
       `/api/ai/requests/${requestId}/citations`,
@@ -679,6 +696,11 @@ export function ChatPanel({
           {error}
         </p>
       )}
+      {notice && (
+        <p className="ai-notice" role="status">
+          {notice}
+        </p>
+      )}
       <div className="chat-messages" role="log" aria-label="Tin nhắn">
         <button
           hidden={!cursor}
@@ -843,6 +865,18 @@ export function ChatPanel({
                 <button onClick={() => void sources(m.request_id)}>
                   Nguồn dữ liệu & token
                 </button>
+                {m.status === "completed" && m.content && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void saveAsDraft(m.request_id).catch((e) =>
+                        setError(e.message),
+                      )
+                    }
+                  >
+                    Dùng làm nháp thảo luận
+                  </button>
+                )}
                 {m.finish_reason === "length" &&
                   index === messages.length - 1 && (
                     <button

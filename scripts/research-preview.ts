@@ -15,6 +15,7 @@ for (const migration of [
   "0004_ai_citations.sql",
   "0005_ai_quota_truncation.sql",
   "0006_ai_token_estimate.sql",
+  "0007_ai_report_drafts.sql",
 ])
   await sql.exec(
     await readFile(

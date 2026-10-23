@@ -9,7 +9,7 @@ import {
 } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import supertest from "supertest";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { createApp } from "./app.js";
@@ -109,25 +109,13 @@ const provider: MediaProvider = {
 };
 beforeAll(async () => {
   sql = new PGlite();
-  await sql.exec(
-    await readFile(
-      new URL("../migrations/0001_accounts_reports.sql", import.meta.url),
-      "utf8",
-    ),
-  );
+  // Same order as the migration runner, so new tables used by shared routes exist.
+  const dir = new URL("../migrations/", import.meta.url);
+  for (const name of (await readdir(dir))
+    .filter((n) => n.endsWith(".sql"))
+    .sort())
+    await sql.exec(await readFile(new URL(name, dir), "utf8"));
   let tail = Promise.resolve();
-  await sql.exec(
-    await readFile(
-      new URL("../migrations/0002_research_ai.sql", import.meta.url),
-      "utf8",
-    ),
-  );
-  await sql.exec(
-    await readFile(
-      new URL("../migrations/0003_ai_model_pricing.sql", import.meta.url),
-      "utf8",
-    ),
-  );
   const lock = async () => {
     let release!: () => void;
     const current = new Promise<void>((r) => {
