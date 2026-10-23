@@ -16,6 +16,19 @@ import type {
   Session,
 } from "./types";
 const fmtTokens = (n: number) => n.toLocaleString("vi-VN");
+const TOOL_LABELS: Record<string, string> = {
+  get_project_overview: "tổng quan project",
+  list_project_reports: "danh sách báo cáo",
+  get_report_summary: "tóm tắt báo cáo",
+  query_report_rows: "lọc dòng",
+  get_compound_details: "chi tiết hợp chất",
+  compare_reports: "so sánh báo cáo",
+  get_review_queue: "hàng đợi duyệt",
+  aggregate_report: "thống kê nhóm",
+  distribution: "phân bố",
+  find_duplicates: "tìm trùng",
+  lookup_compound: "tra cứu PubChem/NPClassifier",
+};
 type RowOverride = { reportIds: string[]; rowIds: string[] };
 interface CitationRow extends Citation {
   reportTitle: string | null;
@@ -80,6 +93,7 @@ export function ChatPanel({
     [preview, setPreview] = useState<TokenPreview | null>(null),
     [checked, setChecked] = useState<Record<string, CitationRow[]>>({}),
     [notice, setNotice] = useState(""),
+    [feedbackDraft, setFeedbackDraft] = useState<Record<string, string>>({}),
     [previewError, setPreviewError] = useState("");
   // Quota is shared by every chat on the provider, so re-read it after each turn.
   async function refreshQuotas() {
@@ -191,6 +205,7 @@ export function ChatPanel({
                 citations: data.citations,
                 finish_reason: data.finishReason,
                 queue_position: data.queuePosition,
+                tool_progress: data.toolRuns.map((t) => t.tool_name),
                 status: data.state,
                 state: data.state,
                 error_message: data.error,
@@ -400,6 +415,25 @@ export function ChatPanel({
     window.dispatchEvent(new CustomEvent(DRAFT_EVENT, { detail: reportId }));
     setNotice(
       "Đã lưu làm nháp “Kết quả và thảo luận”. Hãy đọc và sửa ở mục nháp trước khi xuất Word.",
+    );
+  }
+  // Clicking the active rating again (without a comment) clears it.
+  async function rate(m: Message, rating: 1 | -1, comment = "") {
+    const clear = m.feedback_rating === rating && !comment;
+    await jsonApi(
+      `/api/ai/requests/${m.request_id}/feedback`,
+      clear ? jsonBody({}, "DELETE") : jsonBody({ rating, comment }, "PUT"),
+    );
+    setMessages((prev) =>
+      prev.map((x) =>
+        x.id === m.id
+          ? {
+              ...x,
+              feedback_rating: clear ? null : rating,
+              feedback_comment: clear ? null : comment,
+            }
+          : x,
+      ),
     );
   }
   async function loadCitations(requestId: string) {
@@ -778,7 +812,10 @@ export function ChatPanel({
                   }
                 />
               ) : (
-                m.content || "Đang xử lý dữ liệu…"
+                m.content ||
+                (m.tool_progress?.length
+                  ? `Đang tra dữ liệu: ${m.tool_progress.map((t) => TOOL_LABELS[t] ?? t).join(" → ")}…`
+                  : "Đang xử lý dữ liệu…")
               )}
             </div>
             {m.role === "assistant" &&
@@ -881,6 +918,37 @@ export function ChatPanel({
                     Dùng làm nháp thảo luận
                   </button>
                 )}
+                {m.status === "completed" && m.content && (
+                  <>
+                    <button
+                      type="button"
+                      className="feedback-button"
+                      aria-pressed={m.feedback_rating === 1}
+                      aria-label="Câu trả lời hữu ích"
+                      onClick={() =>
+                        void rate(m, 1).catch((e) => setError(e.message))
+                      }
+                    >
+                      👍
+                    </button>
+                    <button
+                      type="button"
+                      className="feedback-button"
+                      aria-pressed={m.feedback_rating === -1}
+                      aria-label="Câu trả lời chưa đúng"
+                      onClick={() =>
+                        m.feedback_rating === -1
+                          ? void rate(m, -1).catch((e) => setError(e.message))
+                          : setFeedbackDraft((prev) => ({
+                              ...prev,
+                              [m.request_id]: prev[m.request_id] ?? "",
+                            }))
+                      }
+                    >
+                      👎
+                    </button>
+                  </>
+                )}
                 {m.finish_reason === "length" &&
                   index === messages.length - 1 && (
                     <button
@@ -906,6 +974,46 @@ export function ChatPanel({
                   </button>
                 )}
               </div>
+            )}
+            {m.request_id in feedbackDraft && (
+              <form
+                className="feedback-form"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void rate(m, -1, feedbackDraft[m.request_id])
+                    .then(() =>
+                      setFeedbackDraft(
+                        ({ [m.request_id]: _, ...rest }) => rest,
+                      ),
+                    )
+                    .catch((err) => setError(err.message));
+                }}
+              >
+                <label>
+                  Điều gì chưa đúng? (không bắt buộc)
+                  <textarea
+                    maxLength={1000}
+                    value={feedbackDraft[m.request_id]}
+                    onChange={(e) =>
+                      setFeedbackDraft((prev) => ({
+                        ...prev,
+                        [m.request_id]: e.target.value,
+                      }))
+                    }
+                  />
+                </label>
+                <div className="ai-actions">
+                  <button type="submit">Gửi góp ý</button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setFeedbackDraft(({ [m.request_id]: _, ...rest }) => rest)
+                    }
+                  >
+                    Hủy
+                  </button>
+                </div>
+              </form>
             )}
             {m.role === "assistant" && sourceInfo[m.request_id] && (
               <details className="chat-sources" open>

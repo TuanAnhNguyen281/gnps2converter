@@ -27,6 +27,8 @@ interface AdminData {
     requests: number;
     failed: number;
     interrupted: number;
+    thumbs_up: number;
+    thumbs_down: number;
     input_tokens: number;
     output_tokens: number;
   }[];
@@ -102,6 +104,7 @@ export function AdminUsage() {
               <th>Lượt</th>
               <th>Lỗi</th>
               <th>Gián đoạn</th>
+              <th>👍/👎</th>
               <th>Token vào</th>
               <th>Token ra</th>
             </tr>
@@ -116,6 +119,9 @@ export function AdminUsage() {
                 <td>{m.requests}</td>
                 <td>{m.failed}</td>
                 <td>{m.interrupted}</td>
+                <td>
+                  {m.thumbs_up}/{m.thumbs_down}
+                </td>
                 <td>{fmt(m.input_tokens)}</td>
                 <td>{fmt(m.output_tokens)}</td>
               </tr>

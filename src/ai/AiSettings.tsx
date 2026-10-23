@@ -461,6 +461,29 @@ export function AiSettings() {
         </section>
       </div>
       {summary && <UsageTables summary={summary} />}
+      <p className="ai-disclosure">
+        <button
+          type="button"
+          onClick={() =>
+            void jsonApi<unknown[]>("/api/ai/feedback/export")
+              .then((rows) => {
+                const link = document.createElement("a");
+                link.href = URL.createObjectURL(
+                  new Blob([JSON.stringify(rows, null, 2)], {
+                    type: "application/json",
+                  }),
+                );
+                link.download = "ai-feedback.json";
+                link.click();
+                URL.revokeObjectURL(link.href);
+              })
+              .catch((e) => setError(e.message))
+          }
+        >
+          Tải phản hồi 👍/👎 của tôi
+        </button>{" "}
+        Dùng các câu 👎 để bổ sung ca kiểm thử cho scripts/ai-eval.ts.
+      </p>
       <AdminUsage />
       {providers.map((p) => (
         <section key={p.id} className="ai-card">

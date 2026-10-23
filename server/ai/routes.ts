@@ -849,7 +849,7 @@ export function researchRouter(
           .parse(req.query.before ?? 2147483647),
         rows = (
           await db.query(
-            `SELECT m.*,r.state,r.error_message,r.model_id,r.provider_name,r.context_snapshot_id FROM ai_messages m JOIN ai_requests r ON r.id=m.request_id WHERE m.conversation_id=$1 AND m.sequence<$2 ORDER BY m.sequence DESC LIMIT 51`,
+            `SELECT m.*,r.state,r.error_message,r.model_id,r.provider_name,r.context_snapshot_id,f.rating AS feedback_rating,f.comment AS feedback_comment FROM ai_messages m JOIN ai_requests r ON r.id=m.request_id LEFT JOIN ai_feedback f ON f.request_id=r.id AND m.role='assistant' WHERE m.conversation_id=$1 AND m.sequence<$2 ORDER BY m.sequence DESC LIMIT 51`,
             [c.id, before],
           )
         ).rows;
@@ -1064,8 +1064,8 @@ export function researchRouter(
           [days],
         ),
         db.query(
-          `SELECT r.provider_name,r.model_id,count(DISTINCT r.owner_id)::int AS accounts,count(*)::int AS requests,count(*) FILTER (WHERE r.state='failed')::int AS failed,count(*) FILTER (WHERE r.state='interrupted')::int AS interrupted,coalesce(sum(us.input_tokens),0)::bigint AS input_tokens,coalesce(sum(us.output_tokens),0)::bigint AS output_tokens
-           FROM ai_requests r JOIN ai_usage us ON us.request_id=r.id WHERE r.started_at>=${since} GROUP BY 1,2 ORDER BY requests DESC LIMIT 50`,
+          `SELECT r.provider_name,r.model_id,count(DISTINCT r.owner_id)::int AS accounts,count(*)::int AS requests,count(*) FILTER (WHERE r.state='failed')::int AS failed,count(*) FILTER (WHERE r.state='interrupted')::int AS interrupted,coalesce(sum(us.input_tokens),0)::bigint AS input_tokens,coalesce(sum(us.output_tokens),0)::bigint AS output_tokens,count(fb.rating) FILTER (WHERE fb.rating=1)::int AS thumbs_up,count(fb.rating) FILTER (WHERE fb.rating=-1)::int AS thumbs_down
+           FROM ai_requests r JOIN ai_usage us ON us.request_id=r.id LEFT JOIN ai_feedback fb ON fb.request_id=r.id WHERE r.started_at>=${since} GROUP BY 1,2 ORDER BY requests DESC LIMIT 50`,
           [days],
         ),
         db.query(
@@ -2192,6 +2192,51 @@ export function researchRouter(
               : null,
           };
         }),
+      );
+    }),
+  );
+  // 👍/👎 on a finished answer. Stored for the owner's own evaluation set;
+  // admins only ever see counts.
+  router.put(
+    "/ai/requests/:id/feedback",
+    route(async (req, res) => {
+      const user = owner(req),
+        r = await owned("ai_requests", req.params.id as string, user),
+        b = z
+          .object({
+            rating: z.union([z.literal(1), z.literal(-1)]),
+            comment: z.string().trim().max(1000).default(""),
+          })
+          .strict()
+          .parse(req.body);
+      if (r.state !== "completed")
+        throw new ApiError(400, "Chỉ đánh giá câu trả lời đã hoàn tất.");
+      await db.query(
+        "INSERT INTO ai_feedback(request_id,owner_id,rating,comment) VALUES($1,$2,$3,$4) ON CONFLICT(request_id) DO UPDATE SET rating=EXCLUDED.rating,comment=EXCLUDED.comment,updated_at=now()",
+        [r.id, user, b.rating, b.comment],
+      );
+      res.json({ rating: b.rating, comment: b.comment });
+    }),
+  );
+  router.delete(
+    "/ai/requests/:id/feedback",
+    route(async (req, res) => {
+      const r = await owned("ai_requests", req.params.id as string, owner(req));
+      await db.query("DELETE FROM ai_feedback WHERE request_id=$1", [r.id]);
+      res.sendStatus(204);
+    }),
+  );
+  // The owner's rated answers with question and answer, to turn 👎 into eval cases.
+  router.get(
+    "/ai/feedback/export",
+    route(async (req, res) => {
+      res.json(
+        (
+          await db.query(
+            `SELECT f.rating,f.comment,f.updated_at,r.model_id,r.provider_name,r.user_message AS question,m.content AS answer,m.citations FROM ai_feedback f JOIN ai_requests r ON r.id=f.request_id JOIN ai_messages m ON m.request_id=r.id AND m.role='assistant' WHERE f.owner_id=$1 ORDER BY f.updated_at DESC LIMIT 500`,
+            [owner(req)],
+          )
+        ).rows,
       );
     }),
   );

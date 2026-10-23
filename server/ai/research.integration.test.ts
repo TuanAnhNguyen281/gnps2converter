@@ -271,6 +271,7 @@ beforeAll(async () => {
     "0006_ai_token_estimate.sql",
     "0007_ai_report_drafts.sql",
     "0008_ai_request_queue.sql",
+    "0009_ai_feedback_lookup_vision.sql",
   ])
     await sql.exec(
       await readFile(
@@ -1082,6 +1083,38 @@ describe("Research project, provider and persistent chat", () => {
       (await a.get(`/api/ai/reports/${reportId}/discussion`)).body,
     ).toBeNull();
   });
+  it("stores owner feedback on finished answers and exports it", async () => {
+    const answers = (
+      await a.get(`/api/ai/conversations/${conversationId}/messages`)
+    ).body.items.filter((m: any) => m.role === "assistant");
+    const done = answers.find((m: any) => m.status === "completed"),
+      failed = answers.find((m: any) => m.status === "failed");
+    const put = (id: string, body: object, agent = a, csrf = csrfA) =>
+      agent
+        .put(`/api/ai/requests/${id}/feedback`)
+        .set("X-CSRF-Token", csrf)
+        .send(body);
+    expect(
+      (await put(done.request_id, { rating: -1, comment: "Sai số ppm" }))
+        .status,
+    ).toBe(200);
+    expect((await put(done.request_id, { rating: 2 })).status).toBe(400);
+    expect((await put(failed.request_id, { rating: 1 })).status).toBe(400);
+    expect((await put(done.request_id, { rating: 1 }, b, csrfB)).status).toBe(
+      404,
+    );
+    const listed = (
+      await a.get(`/api/ai/conversations/${conversationId}/messages`)
+    ).body.items.find((m: any) => m.id === done.id);
+    expect(listed).toMatchObject({
+      feedback_rating: -1,
+      feedback_comment: "Sai số ppm",
+    });
+    const exported = (await a.get("/api/ai/feedback/export")).body;
+    expect(exported[0]).toMatchObject({ rating: -1, comment: "Sai số ppm" });
+    expect(exported[0].question.length).toBeGreaterThan(0);
+    expect((await b.get("/api/ai/feedback/export")).body).toEqual([]);
+  });
   it("shows system-wide aggregates only to a verified admin", async () => {
     // Listed email but registered with a password: not verified, not admin.
     expect((await a.get("/api/ai/admin/usage")).status).toBe(403);
@@ -1094,6 +1127,10 @@ describe("Research project, provider and persistent chat", () => {
     expect(r.body.accounts[0].requests).toBeGreaterThan(0);
     expect(r.body.models.length).toBeGreaterThan(0);
     expect(r.body.queue).toMatchObject({ queued: 0, maxConcurrent: 2 });
+    expect(
+      r.body.models.reduce((n: number, m: any) => n + m.thumbs_down, 0),
+    ).toBe(1);
+    expect(JSON.stringify(r.body)).not.toContain("Sai số ppm");
     expect(JSON.stringify(r.body)).not.toContain("Có 1 hợp chất");
     expect((await b.get("/api/ai/admin/usage")).status).toBe(403);
   });

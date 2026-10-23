@@ -114,6 +114,9 @@ export interface Message {
   citations?: Citation[] | null;
   finish_reason?: string | null;
   queue_position?: number | null;
+  feedback_rating?: 1 | -1 | null;
+  feedback_comment?: string | null;
+  tool_progress?: string[];
 }
 export interface RequestState {
   contextInfo?: {

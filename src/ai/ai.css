@@ -667,3 +667,20 @@
 .usage-summary .md-table {
   overflow-x: auto;
 }
+.chat-content .feedback-button,
+.ai-actions .feedback-button {
+  min-width: 38px;
+}
+.ai-actions .feedback-button[aria-pressed="true"] {
+  background: color-mix(in srgb, #268a98 22%, var(--panel, #fff));
+  border-color: #268a98;
+}
+.feedback-form {
+  margin-top: 8px;
+}
+.feedback-form textarea {
+  width: 100%;
+  min-height: 60px;
+  font: inherit;
+  font-size: 13px;
+}
