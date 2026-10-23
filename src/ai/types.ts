@@ -56,6 +56,28 @@ export interface Provider {
   quota?: ProviderQuota;
   models: Model[];
 }
+export interface TokenPreview {
+  providerName: string;
+  modelId: string;
+  calibrated: boolean;
+  input: number;
+  outputMax: number;
+  reserve: number;
+  toolRounds: boolean;
+  contextLimit: number;
+  breakdown: {
+    instructions: number;
+    data: number;
+    history: number;
+    question: number;
+    tools: number;
+  };
+  rows: { examined: number; sent: number; truncated: boolean };
+  history: { included: number; omitted: number };
+  quota: ProviderQuota;
+  fits: boolean;
+  reason: string | null;
+}
 export interface ProbeResult {
   content: string;
   stream: "ok" | "failed";

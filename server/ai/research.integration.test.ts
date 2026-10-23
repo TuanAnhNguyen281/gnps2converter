@@ -14,6 +14,8 @@ const config = readConfig({
   SESSION_SECRET: "test-only-secret-32-characters-long",
   AI_ENCRYPTION_KEY: "ab".repeat(32),
   AI_ALLOWED_HOSTS: "example.com",
+  // finish() polls request state; the default per-minute limit is for real clients.
+  API_RATE_LIMIT: "10000",
 });
 let sql: PGlite,
   db: Database,
@@ -260,6 +262,7 @@ beforeAll(async () => {
     "0003_ai_model_pricing.sql",
     "0004_ai_citations.sql",
     "0005_ai_quota_truncation.sql",
+    "0006_ai_token_estimate.sql",
   ])
     await sql.exec(
       await readFile(
@@ -760,6 +763,73 @@ describe("Research project, provider and persistent chat", () => {
     state = await finish((await send()).body.requestId);
     expect(state.content).toBe("OK");
     expect(captured.map((b) => Boolean(b.stream_options))).toEqual([false]);
+    expect(
+      (
+        await db.query(
+          "SELECT stream_options_rejected FROM ai_provider_models WHERE provider_id=$1 AND model_id='test-model'",
+          [providerId],
+        )
+      ).rows[0].stream_options_rejected,
+    ).toBe(true);
+    await post(`/api/ai/providers/${providerId}/models`, {
+      modelId: "test-model",
+    });
+    mode = "success";
+  });
+  it("previews the token estimate and reserves each tool round separately", async () => {
+    expect(
+      (
+        await db.query(
+          "SELECT token_calibration FROM ai_provider_models WHERE provider_id=$1 AND model_id='test-model'",
+          [providerId],
+        )
+      ).rows[0].token_calibration,
+    ).not.toBeNull();
+    await post(`/api/ai/providers/${providerId}/models`, {
+      modelId: "test-model",
+      supportsTools: true,
+    });
+    const body = {
+      message: "Phân tích báo cáo",
+      context: { reportIds: [reportId], scope: "report" },
+    };
+    const preview = await post(
+      `/api/ai/conversations/${conversationId}/preview`,
+      body,
+    );
+    expect(preview.status).toBe(200);
+    expect(preview.body).toMatchObject({
+      outputMax: 2000,
+      fits: true,
+      reason: null,
+      toolRounds: true,
+      rows: { sent: 1, truncated: false },
+    });
+    expect(preview.body.reserve).toBe(preview.body.input + 2000);
+    expect(preview.body.breakdown.data).toBeGreaterThan(0);
+    expect(preview.body.breakdown.tools).toBeGreaterThan(0);
+    // Room for the first call only: the tool round must stop at its own reservation.
+    const used = preview.body.quota.monthUsed;
+    await a
+      .patch(`/api/ai/providers/${providerId}`)
+      .set("X-CSRF-Token", csrfA)
+      .send({
+        monthlyTokenLimit: used + preview.body.reserve + 10,
+        quotaReservePercent: 0,
+      });
+    mode = "tool";
+    const r = await post(`/api/ai/conversations/${conversationId}/messages`, {
+      ...body,
+      clientRequestId: randomUUID(),
+    });
+    expect(r.status).toBe(202);
+    const state = await finish(r.body.requestId, "failed");
+    expect(state.error).toContain("Hạn mức token");
+    expect(state.toolRuns).toHaveLength(1);
+    await a
+      .patch(`/api/ai/providers/${providerId}`)
+      .set("X-CSRF-Token", csrfA)
+      .send({ monthlyTokenLimit: 2000000, quotaReservePercent: 10 });
     await post(`/api/ai/providers/${providerId}/models`, {
       modelId: "test-model",
     });
@@ -777,6 +847,43 @@ describe("Research project, provider and persistent chat", () => {
       tools: "ok",
       usage: true,
     });
+  });
+  it("pools quota for providers sharing a key and counts chat tests", async () => {
+    const before = (await a.get("/api/ai/providers")).body.find(
+      (x: any) => x.id === providerId,
+    ).quota.monthUsed;
+    expect(
+      (
+        await post(`/api/ai/providers/${providerId}/test`, {
+          modelId: "test-model",
+        })
+      ).status,
+    ).toBe(200);
+    const twin = await post("/api/ai/providers", {
+      name: "Same account",
+      baseUrl: "https://example.com/v1",
+      apiKey: "test-secret-key",
+    });
+    const other = await post("/api/ai/providers", {
+      name: "Other account",
+      baseUrl: "https://example.com/v1",
+      apiKey: "another-key",
+    });
+    const list = (await a.get("/api/ai/providers")).body,
+      main = list.find((x: any) => x.id === providerId),
+      same = list.find((x: any) => x.id === twin.body.id),
+      diff = list.find((x: any) => x.id === other.body.id);
+    expect(main.quota.monthUsed).toBeGreaterThan(before);
+    expect(same.quota.monthUsed).toBe(main.quota.monthUsed);
+    expect(same.quota.sharedWith).toBe(1);
+    expect(diff.quota.monthUsed).toBe(0);
+    expect(JSON.stringify(list)).not.toContain("key_fingerprint");
+    expect(JSON.stringify(list)).not.toContain("ciphertext");
+    for (const id of [twin.body.id, other.body.id])
+      await a
+        .patch(`/api/ai/providers/${id}`)
+        .set("X-CSRF-Token", csrfA)
+        .send({ enabled: false });
   });
   it("enforces the provider token quota and settles failed calls", async () => {
     const providers = (await a.get("/api/ai/providers")).body,

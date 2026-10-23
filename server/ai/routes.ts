@@ -1,8 +1,14 @@
 import { Router } from "express";
-import { randomUUID, createHash } from "node:crypto";
+import { randomUUID, createHash, createHmac } from "node:crypto";
 import { z } from "zod";
 import { estimateCost } from "./pricing.js";
 import { probeModel as probe } from "./probe.js";
+import {
+  calibrate,
+  estimatePromptTokens,
+  estimateTextTokens,
+  nextCalibration,
+} from "./tokens.js";
 import { owner, route, ApiError } from "../errors.js";
 import type { Config } from "../config.js";
 import { transaction, type Database, type Connection } from "../db/index.js";
@@ -66,23 +72,47 @@ export function researchRouter(
   transport: ProviderTransport = secureTransport,
 ) {
   const router = Router(),
-    running = new Map<string, AbortController>(),
-    // provider|model pairs whose endpoint rejected stream_options; skip it next time.
-    noStreamOptions = new Set<string>();
+    running = new Map<string, AbortController>();
   const usable = (limit: number, reservePercent: number) =>
     Math.floor((limit * (100 - reservePercent)) / 100);
   // Usage of one provider account in the current day/month (Asia/Ho_Chi_Minh).
   // Settled requests count provider usage (or the failure estimate); running and
   // unsettled ones count their reservation, so the check stays conservative.
+  // HMAC (keyed by the server's AI key) so equal API keys can be matched
+  // without storing or exposing the key itself.
+  const keyFingerprint = (apiKey: string) =>
+    createHmac("sha256", Buffer.from(config.aiEncryptionKey, "hex"))
+      .update(apiKey)
+      .digest("hex")
+      .slice(0, 32);
+  // Providers saved before fingerprints existed get one on first use.
+  async function ensureFingerprint(p: any) {
+    if (p.key_fingerprint || !p.secret) return;
+    try {
+      p.key_fingerprint = keyFingerprint(
+        decryptKey(p.secret, p.key_version, config),
+      );
+    } catch {
+      return;
+    }
+    await db.query("UPDATE ai_providers SET key_fingerprint=$2 WHERE id=$1", [
+      p.id,
+      p.key_fingerprint,
+    ]);
+  }
   async function providerUsage(
     c: Pick<Database | Connection, "query">,
     providerId: string,
   ) {
     const r = (
       await c.query(
-        `WITH b AS (SELECT date_trunc('month',now() AT TIME ZONE 'Asia/Ho_Chi_Minh') AT TIME ZONE 'Asia/Ho_Chi_Minh' AS month_start,date_trunc('day',now() AT TIME ZONE 'Asia/Ho_Chi_Minh') AT TIME ZONE 'Asia/Ho_Chi_Minh' AS day_start)
-        SELECT coalesce(sum(t.n),0)::bigint AS month,coalesce(sum(t.n) FILTER (WHERE t.started_at>=b.day_start),0)::bigint AS day,coalesce(sum(t.n) FILTER (WHERE t.pending),0)::bigint AS pending,count(*) FILTER (WHERE t.estimated)::int AS estimated
-        FROM b,LATERAL (SELECT r.started_at,CASE WHEN u.input_tokens IS NOT NULL THEN u.input_tokens+u.output_tokens ELSE u.reserved_tokens END AS n,r.state IN ('queued','running') AS pending,(u.input_tokens IS NULL OR u.usage_source='estimated') AND r.state NOT IN ('queued','running') AS estimated FROM ai_requests r JOIN ai_usage u ON u.request_id=r.id WHERE r.provider_id=$1 AND r.started_at>=b.month_start) t GROUP BY b.day_start`,
+        `WITH b AS (SELECT date_trunc('month',now() AT TIME ZONE 'Asia/Ho_Chi_Minh') AT TIME ZONE 'Asia/Ho_Chi_Minh' AS month_start,date_trunc('day',now() AT TIME ZONE 'Asia/Ho_Chi_Minh') AT TIME ZONE 'Asia/Ho_Chi_Minh' AS day_start),
+        pool AS (SELECT id FROM ai_providers WHERE id=$1 OR key_fingerprint=(SELECT key_fingerprint FROM ai_providers WHERE id=$1))
+        SELECT coalesce(sum(t.n),0)::bigint AS month,coalesce(sum(t.n) FILTER (WHERE t.started_at>=b.day_start),0)::bigint AS day,coalesce(sum(t.n) FILTER (WHERE t.pending),0)::bigint AS pending,count(*) FILTER (WHERE t.estimated)::int AS estimated,(SELECT count(*)::int FROM pool) AS pooled
+        FROM b LEFT JOIN LATERAL (
+          SELECT r.started_at,CASE WHEN u.input_tokens IS NOT NULL THEN u.input_tokens+u.output_tokens ELSE u.reserved_tokens END AS n,r.state IN ('queued','running') AS pending,(u.input_tokens IS NULL OR u.usage_source='estimated') AND r.state NOT IN ('queued','running') AS estimated FROM ai_requests r JOIN ai_usage u ON u.request_id=r.id WHERE r.provider_id IN (SELECT id FROM pool) AND r.started_at>=b.month_start
+          UNION ALL SELECT e.created_at,e.tokens,false,false FROM ai_provider_usage_events e WHERE e.provider_id IN (SELECT id FROM pool) AND e.created_at>=b.month_start
+        ) t ON true GROUP BY b.day_start`,
         [providerId],
       )
     ).rows[0];
@@ -91,6 +121,8 @@ export function researchRouter(
       day: Number(r?.day ?? 0),
       pending: Number(r?.pending ?? 0),
       estimated: Number(r?.estimated ?? 0),
+      // Other providers (any user) configured with the same API key.
+      sharedWith: Math.max(0, Number(r?.pooled ?? 1) - 1),
     };
   }
   const limit = (v: unknown) =>
@@ -111,9 +143,37 @@ export function researchRouter(
       dayUsable: day === null ? null : usable(day, reserve),
       pending: used.pending,
       estimatedRequests: used.estimated,
+      sharedWith: used.sharedWith,
       reservePercent: reserve,
       timezone: "Asia/Ho_Chi_Minh",
     };
+  }
+  function assertQuota(
+    p: any,
+    quota: ReturnType<typeof providerQuota>,
+    amount: number,
+  ) {
+    for (const [period, used, cap] of [
+      ["tháng này", quota.monthUsed, quota.monthUsable],
+      ["hôm nay", quota.dayUsed, quota.dayUsable],
+    ] as const)
+      if (cap !== null && used + amount > cap)
+        throw new ApiError(
+          429,
+          `Hạn mức token ${period} của provider ${p.name} không đủ cho lượt này: đã dùng ~${used.toLocaleString("vi-VN")} / ${cap.toLocaleString("vi-VN")} token khả dụng (đã trừ ${quota.reservePercent}% dự phòng), lượt này cần giữ chỗ ~${amount.toLocaleString("vi-VN")}. Hãy thu hẹp phạm vi, giảm output hoặc chờ kỳ hạn mức mới.`,
+          "AI_PROVIDER_QUOTA",
+        );
+  }
+  // Tool rounds reserve their own tokens just before each upstream call.
+  async function reserveRound(id: string, p: any, amount: number) {
+    await transaction(db, async (c) => {
+      await c.query("LOCK TABLE ai_requests IN SHARE ROW EXCLUSIVE MODE");
+      assertQuota(p, providerQuota(p, await providerUsage(c, p.id)), amount);
+      await c.query(
+        "UPDATE ai_usage SET reserved_tokens=reserved_tokens+$2 WHERE request_id=$1",
+        [id, amount],
+      );
+    });
   }
   async function reserveDaily(
     c: Connection,
@@ -156,7 +216,7 @@ export function researchRouter(
   async function model(user: string, providerId: string, modelId: string) {
     const r = (
       await db.query(
-        `SELECT p.*,m.model_id,m.supports_tools,m.supports_stream,m.context_limit,m.max_output,m.input_price_per_million,m.output_price_per_million,m.currency,m.pricing_version FROM ai_providers p JOIN ai_provider_models m ON m.provider_id=p.id WHERE p.id=$1 AND p.owner_id=$2 AND m.model_id=$3 AND p.enabled AND m.enabled`,
+        `SELECT p.*,m.model_id,m.supports_tools,m.supports_stream,m.context_limit,m.max_output,m.input_price_per_million,m.output_price_per_million,m.currency,m.pricing_version,m.token_calibration,m.stream_options_rejected FROM ai_providers p JOIN ai_provider_models m ON m.provider_id=p.id WHERE p.id=$1 AND p.owner_id=$2 AND m.model_id=$3 AND p.enabled AND m.enabled`,
         [providerId, user, modelId],
       )
     ).rows[0];
@@ -165,6 +225,7 @@ export function researchRouter(
         400,
         "Provider/model chưa bật hoặc không thuộc tài khoản.",
       );
+    await ensureFingerprint(r);
     if (r.max_output >= r.context_limit - 1000)
       throw new ApiError(
         400,
@@ -394,10 +455,15 @@ export function researchRouter(
     route(async (req, res) => {
       const rows = (
         await db.query(
-          "SELECT id,name,base_url,adapter_type,enabled,key_version,monthly_token_limit,daily_token_limit,quota_reserve_percent FROM ai_providers WHERE owner_id=$1 ORDER BY created_at",
+          "SELECT id,name,base_url,adapter_type,enabled,key_version,monthly_token_limit,daily_token_limit,quota_reserve_percent,key_fingerprint,secret FROM ai_providers WHERE owner_id=$1 ORDER BY created_at",
           [owner(req)],
         )
       ).rows;
+      for (const p of rows) {
+        await ensureFingerprint(p);
+        delete p.secret;
+        delete p.key_fingerprint;
+      }
       res.json(
         await Promise.all(
           rows.map(async (p) => ({
@@ -436,7 +502,7 @@ export function researchRouter(
         .json(
           (
             await db.query(
-              "INSERT INTO ai_providers(id,owner_id,name,base_url,secret,key_version,enabled,monthly_token_limit,daily_token_limit,quota_reserve_percent) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id,name,base_url,enabled",
+              "INSERT INTO ai_providers(id,owner_id,name,base_url,secret,key_version,enabled,monthly_token_limit,daily_token_limit,quota_reserve_percent,key_fingerprint) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id,name,base_url,enabled",
               [
                 randomUUID(),
                 user,
@@ -452,6 +518,7 @@ export function researchRouter(
                   ? DEFAULT_PROVIDER_TOKENS
                   : b.dailyTokenLimit,
                 b.quotaReservePercent ?? 10,
+                keyFingerprint(b.apiKey),
               ],
             )
           ).rows[0],
@@ -469,7 +536,7 @@ export function researchRouter(
         b = providerSchema.partial().parse(req.body);
       providerUrl(b.baseUrl ?? p.base_url, "models", config);
       await db.query(
-        "UPDATE ai_providers SET name=$2,base_url=$3,enabled=$4,secret=$5,key_version=$6,monthly_token_limit=$7,daily_token_limit=$8,quota_reserve_percent=$9 WHERE id=$1",
+        "UPDATE ai_providers SET name=$2,base_url=$3,enabled=$4,secret=$5,key_version=$6,monthly_token_limit=$7,daily_token_limit=$8,quota_reserve_percent=$9,key_fingerprint=$10 WHERE id=$1",
         [
           p.id,
           b.name ?? p.name,
@@ -484,6 +551,7 @@ export function researchRouter(
             ? p.daily_token_limit
             : b.dailyTokenLimit,
           b.quotaReservePercent ?? p.quota_reserve_percent,
+          b.apiKey ? keyFingerprint(b.apiKey) : p.key_fingerprint,
         ],
       );
       res.sendStatus(204);
@@ -551,23 +619,30 @@ export function researchRouter(
     }
     return response;
   }
+  async function markStreamOptions(p: any, rejected: boolean) {
+    if (Boolean(p.stream_options_rejected) === rejected) return;
+    p.stream_options_rejected = rejected;
+    await db.query(
+      "UPDATE ai_provider_models SET stream_options_rejected=$3 WHERE provider_id=$1 AND model_id=$2",
+      [p.id, p.model_id, rejected],
+    );
+  }
   async function probeModel(p: any, signal: AbortSignal) {
     const r = await probe(p.model_id, (body) =>
       callProvider(p, "chat/completions", body, signal),
     );
-    if (r.streamOptions === "rejected")
-      noStreamOptions.add(`${p.id}|${p.model_id}`);
+    if (r.streamOptions)
+      await markStreamOptions(p, r.streamOptions === "rejected");
     return r;
   }
   // stream_options is OpenAI-standard but some compatible endpoints reject it:
-  // retry once without it and remember the model so later calls skip it.
+  // retry once without it and remember that on the model row.
   async function callChat(
     p: any,
     body: Record<string, any>,
     signal: AbortSignal,
   ) {
-    const key = `${p.id}|${p.model_id}`,
-      withOptions = body.stream && !noStreamOptions.has(key);
+    const withOptions = body.stream && !p.stream_options_rejected;
     try {
       return await callProvider(
         p,
@@ -584,7 +659,7 @@ export function researchRouter(
         !["AI_PROVIDER_400", "AI_PROVIDER_422"].includes(e.code ?? "")
       )
         throw e;
-      noStreamOptions.add(key);
+      await markStreamOptions(p, true);
       return callProvider(p, "chat/completions", body, signal);
     }
   }
@@ -649,7 +724,16 @@ export function researchRouter(
         ]);
         await reserveDaily(c, owner(req), 1536, true);
       });
+      // Three short calls; reserve generously, then record what was spent.
+      await transaction(db, async (c) => {
+        await c.query("LOCK TABLE ai_requests IN SHARE ROW EXCLUSIVE MODE");
+        assertQuota(p, providerQuota(p, await providerUsage(c, p.id)), 600);
+      });
       const checks = await probeModel(p, AbortSignal.timeout(45000));
+      await db.query(
+        "INSERT INTO ai_provider_usage_events(id,provider_id,kind,tokens) VALUES($1,$2,'probe',$3)",
+        [randomUUID(), p.id, checks.tokens],
+      );
       await db.query(
         "UPDATE ai_provider_models SET verified_at=now() WHERE provider_id=$1 AND model_id=$2",
         [p.id, b.modelId],
@@ -881,6 +965,231 @@ export function researchRouter(
     }),
   );
 
+  async function resolveModel(
+    user: string,
+    conversation: any,
+    b: { providerId?: string; modelId?: string },
+  ) {
+    const setting = (
+      await db.query(
+        `SELECT provider_id,model_id FROM ai_settings WHERE owner_id=$1 AND (scope='account' AND scope_id=$1 OR scope='project' AND scope_id=$2 OR scope='session' AND scope_id=$3) ORDER BY CASE scope WHEN 'session' THEN 0 WHEN 'project' THEN 1 ELSE 2 END LIMIT 1`,
+        [user, conversation.project_id, conversation.research_session_id],
+      )
+    ).rows[0];
+    if (Boolean(b.providerId) !== Boolean(b.modelId))
+      throw new ApiError(400, "Cần chọn cả provider và model.");
+    const providerId = b.providerId ?? setting?.provider_id,
+      modelId = b.modelId ?? setting?.model_id;
+    if (!providerId || !modelId)
+      throw new ApiError(400, "Hãy cấu hình model trong Cài đặt AI.");
+    return model(user, providerId, modelId);
+  }
+  // Builds the exact first-call prompt. persistSummary=false keeps it read-only for previews.
+  async function buildPrompt(
+    c: Pick<Database | Connection, "query">,
+    conversation: any,
+    message: string,
+    p: any,
+    ctx: ResearchContext,
+    persistSummary: boolean,
+  ) {
+    const budget = Math.min(p.context_limit - p.max_output - 1000, 28000),
+      initial = initialContext(ctx, Math.floor(budget * 0.55));
+    const turns = (
+      await c.query(
+        `SELECT m.sequence,m.content,m.citations,r.user_message FROM ai_messages m JOIN ai_requests r ON r.id=m.request_id WHERE m.conversation_id=$1 AND m.role='assistant' AND m.status='completed' AND r.state='completed' ORDER BY m.sequence DESC LIMIT 15`,
+        [conversation.id],
+      )
+    ).rows.reverse();
+    const history = turns.flatMap((t) => [
+      { role: "user", content: t.user_message },
+      {
+        role: "assistant",
+        content: remapCitations(t.content, t.citations, ctx),
+      },
+    ]);
+    const messages: any[] = [
+      { role: "system", content: systemPrompt },
+      {
+        role: "system",
+        content: `UNTRUSTED RESEARCH DATA\n${toPrompt(ctx, initial)}`,
+      },
+      { role: "user", content: message },
+    ];
+    let included = 0;
+    // Keep complete user/assistant pairs, including the original question on retries.
+    for (let i = history.length - 2; i >= 0; i -= 2) {
+      const pair = history.slice(i, i + 2);
+      if (
+        bytes(messages) +
+          bytes(pair) +
+          (p.supports_tools ? bytes(tools) : 0) +
+          500 >
+        budget
+      )
+        break;
+      messages.splice(2, 0, ...pair);
+      included += 2;
+    }
+    const total = Number(
+      (
+        await c.query(
+          `SELECT count(*)::int AS n FROM ai_requests WHERE conversation_id=$1 AND state='completed'`,
+          [conversation.id],
+        )
+      ).rows[0].n,
+    );
+    const boundary =
+      turns[Math.max(0, turns.length - included / 2)]?.sequence ?? 2147483647;
+    const omitted = total * 2 - included;
+    let summaryVersion = conversation.summary_version;
+    if (omitted > 0) {
+      const excerpts = (
+        await c.query(
+          `SELECT m.sequence,LEFT(r.user_message,160) AS question,LEFT(m.content,200) AS answer_excerpt,m.citations,r.context_snapshot_id FROM ai_messages m JOIN ai_requests r ON r.id=m.request_id WHERE m.conversation_id=$1 AND m.role='assistant' AND r.state='completed' AND m.sequence<$2 ORDER BY m.sequence DESC LIMIT 6`,
+          [conversation.id, boundary],
+        )
+      ).rows
+        .reverse()
+        .map(({ citations, ...e }) => ({
+          ...e,
+          answer_excerpt: remapCitations(e.answer_excerpt, citations, ctx),
+        }));
+      if (persistSummary) {
+        summaryVersion++;
+        await c.query(
+          "UPDATE ai_conversations SET summary=$2,summary_until_seq=$3,summary_version=$4 WHERE id=$1",
+          [
+            conversation.id,
+            JSON.stringify(excerpts),
+            boundary - 1,
+            summaryVersion,
+          ],
+        );
+      }
+      const compressed = {
+        role: "system",
+        content: `HISTORICAL UNTRUSTED EXCERPTS (partial, ${omitted} older messages excluded, current report snapshot overrides historical numbers): ${JSON.stringify(excerpts)}`,
+      };
+      if (
+        bytes(messages) +
+          bytes(compressed) +
+          (p.supports_tools ? bytes(tools) : 0) <
+        budget
+      )
+        messages.splice(2, 0, compressed);
+    }
+    const toolDefs = p.supports_tools ? tools : undefined;
+    return {
+      messages,
+      initial,
+      included,
+      omitted,
+      summaryVersion,
+      budget,
+      rawEstimate: estimatePromptTokens(messages, toolDefs),
+      estimate: calibrate(
+        estimatePromptTokens(messages, toolDefs),
+        p.token_calibration,
+      ),
+    };
+  }
+  // Estimate before sending: builds the same first-call prompt without calling
+  // the provider or reserving quota. The send endpoint re-checks everything.
+  router.post(
+    "/ai/conversations/:id/preview",
+    route(async (req, res) => {
+      const user = owner(req),
+        conversation = await owned(
+          "ai_conversations",
+          req.params.id as string,
+          user,
+        ),
+        b = z
+          .object({
+            message: z.string().max(6000).default(""),
+            providerId: uuid.optional(),
+            modelId: z.string().min(1).max(180).optional(),
+            context: contextSchema.default({}),
+          })
+          .parse(req.body);
+      const p = await resolveModel(user, conversation, b);
+      const preview = await transaction(db, async (c) => {
+        const ctx = await buildContext(
+          c,
+          user,
+          conversation.research_session_id,
+          b.context,
+        );
+        const prompt = await buildPrompt(
+          c,
+          conversation,
+          b.message.trim() || " ",
+          p,
+          ctx,
+          false,
+        );
+        return {
+          prompt,
+          quota: providerQuota(p, await providerUsage(c, p.id)),
+        };
+      });
+      const { prompt, quota } = preview,
+        m = prompt.messages,
+        part = (list: unknown[]) =>
+          calibrate(
+            list.reduce<number>(
+              (n, x) => n + 4 + estimateTextTokens(JSON.stringify(x)),
+              0,
+            ),
+            p.token_calibration,
+          ),
+        reserve = prompt.estimate + p.max_output,
+        caps = [
+          ["tháng này", quota.monthUsed, quota.monthUsable],
+          ["hôm nay", quota.dayUsed, quota.dayUsable],
+        ] as const,
+        blocked = caps.find(
+          ([, used, cap]) => cap !== null && used + reserve > cap,
+        ),
+        tooLarge = prompt.estimate + p.max_output > p.context_limit;
+      res.json({
+        providerName: p.name,
+        modelId: p.model_id,
+        calibrated: p.token_calibration !== null,
+        input: prompt.estimate,
+        outputMax: p.max_output,
+        reserve,
+        toolRounds: p.supports_tools,
+        contextLimit: p.context_limit,
+        breakdown: {
+          instructions: part(m.slice(0, 1)),
+          data: part(m.slice(1, 2)),
+          history: part(m.slice(2, -1)),
+          question: part(m.slice(-1)),
+          tools: p.supports_tools
+            ? calibrate(
+                estimateTextTokens(JSON.stringify(tools)),
+                p.token_calibration,
+              )
+            : 0,
+        },
+        rows: {
+          examined: prompt.initial.examinedRows,
+          sent: prompt.initial.returnedRows,
+          truncated: prompt.initial.truncated,
+        },
+        history: { included: prompt.included, omitted: prompt.omitted },
+        quota,
+        fits: !blocked && !tooLarge,
+        reason: tooLarge
+          ? "Dữ liệu và output vượt context của model; hãy thu hẹp phạm vi hoặc giảm output."
+          : blocked
+            ? `Không đủ hạn mức token ${blocked[0]} cho lượt này (cần giữ chỗ ~${reserve.toLocaleString("vi-VN")}).`
+            : null,
+      });
+    }),
+  );
   router.post(
     "/ai/conversations/:id/messages",
     route(async (req, res) => {
@@ -933,19 +1242,7 @@ export function researchRouter(
       }
       if (conversation.archived_at)
         throw new ApiError(409, "Hội thoại đã lưu trữ.");
-      const setting = (
-        await db.query(
-          `SELECT provider_id,model_id FROM ai_settings WHERE owner_id=$1 AND (scope='account' AND scope_id=$1 OR scope='project' AND scope_id=$2 OR scope='session' AND scope_id=$3) ORDER BY CASE scope WHEN 'session' THEN 0 WHEN 'project' THEN 1 ELSE 2 END LIMIT 1`,
-          [user, conversation.project_id, conversation.research_session_id],
-        )
-      ).rows[0];
-      if (Boolean(b.providerId) !== Boolean(b.modelId))
-        throw new ApiError(400, "Cần chọn cả provider và model.");
-      const providerId = b.providerId ?? setting?.provider_id,
-        modelId = b.modelId ?? setting?.model_id;
-      if (!providerId || !modelId)
-        throw new ApiError(400, "Hãy cấu hình model trong Cài đặt AI.");
-      const p = await model(user, providerId, modelId),
+      const p = await resolveModel(user, conversation, b),
         requestId = randomUUID(),
         snapshotId = randomUUID();
       let ctx!: ResearchContext,
@@ -1035,118 +1332,40 @@ export function researchRouter(
         ).rows[0];
         if (Number(storage.n) + snapshotBytes > config.aiMaxStorageBytes)
           throw new ApiError(429, "Đã hết dung lượng context AI.");
-        const budget = Math.min(p.context_limit - p.max_output - 1000, 28000),
-          initial = initialContext(ctx, Math.floor(budget * 0.55));
-        const turns = (
-          await c.query(
-            `SELECT m.sequence,m.content,m.citations,r.user_message FROM ai_messages m JOIN ai_requests r ON r.id=m.request_id WHERE m.conversation_id=$1 AND m.role='assistant' AND m.status='completed' AND r.state='completed' ORDER BY m.sequence DESC LIMIT 15`,
-            [conversation.id],
-          )
-        ).rows.reverse();
-        const history = turns.flatMap((t) => [
-          { role: "user", content: t.user_message },
-          {
-            role: "assistant",
-            content: remapCitations(t.content, t.citations, ctx),
-          },
-        ]);
-        messages = [
-          { role: "system", content: systemPrompt },
-          {
-            role: "system",
-            content: `UNTRUSTED RESEARCH DATA\n${toPrompt(ctx, initial)}`,
-          },
-          { role: "user", content: b.message },
-        ];
-        let included = 0;
-        // Keep complete user/assistant pairs, including the original question on retries.
-        for (let i = history.length - 2; i >= 0; i -= 2) {
-          const pair = history.slice(i, i + 2);
-          if (
-            bytes(messages) +
-              bytes(pair) +
-              (p.supports_tools ? bytes(tools) : 0) +
-              500 >
-            budget
-          )
-            break;
-          messages.splice(2, 0, ...pair);
-          included += 2;
-        }
-        const total = Number(
-          (
-            await c.query(
-              `SELECT count(*)::int AS n FROM ai_requests WHERE conversation_id=$1 AND state='completed'`,
-              [conversation.id],
-            )
-          ).rows[0].n,
+        const prompt = await buildPrompt(
+          c,
+          conversation,
+          b.message,
+          p,
+          ctx,
+          true,
         );
-        const boundary =
-          turns[Math.max(0, turns.length - included / 2)]?.sequence ??
-          2147483647;
-        const omitted = total * 2 - included;
-        let summaryVersion = conversation.summary_version;
-        if (omitted > 0) {
-          const excerpts = (
-            await c.query(
-              `SELECT m.sequence,LEFT(r.user_message,160) AS question,LEFT(m.content,200) AS answer_excerpt,m.citations,r.context_snapshot_id FROM ai_messages m JOIN ai_requests r ON r.id=m.request_id WHERE m.conversation_id=$1 AND m.role='assistant' AND r.state='completed' AND m.sequence<$2 ORDER BY m.sequence DESC LIMIT 6`,
-              [conversation.id, boundary],
-            )
-          ).rows
-            .reverse()
-            .map(({ citations, ...e }) => ({
-              ...e,
-              answer_excerpt: remapCitations(e.answer_excerpt, citations, ctx),
-            }));
-          summaryVersion++;
-          await c.query(
-            "UPDATE ai_conversations SET summary=$2,summary_until_seq=$3,summary_version=$4 WHERE id=$1",
-            [
-              conversation.id,
-              JSON.stringify(excerpts),
-              boundary - 1,
-              summaryVersion,
-            ],
-          );
-          const compressed = {
-            role: "system",
-            content: `HISTORICAL UNTRUSTED EXCERPTS (partial, ${omitted} older messages excluded, current report snapshot overrides historical numbers): ${JSON.stringify(excerpts)}`,
-          };
-          if (
-            bytes(messages) +
-              bytes(compressed) +
-              (p.supports_tools ? bytes(tools) : 0) <
-            budget
-          )
-            messages.splice(2, 0, compressed);
-        }
+        messages = prompt.messages;
         ctx.promptContext = {
-          initial,
-          historyIncluded: included,
-          historyOmitted: omitted,
-          summaryVersion,
+          initial: prompt.initial,
+          historyIncluded: prompt.included,
+          historyOmitted: prompt.omitted,
+          summaryVersion: prompt.summaryVersion,
         };
         if (
           bytes(ctx) > 8000000 ||
           Number(storage.n) + bytes(ctx) > config.aiMaxStorageBytes
         )
           throw new ApiError(429, "Đã hết dung lượng context AI.");
-        if (bytes(messages) + (p.supports_tools ? bytes(tools) : 0) > budget)
+        if (
+          bytes(messages) + (p.supports_tools ? bytes(tools) : 0) >
+            prompt.budget ||
+          prompt.estimate + p.max_output > p.context_limit
+        )
           throw new ApiError(413, "Context model quá nhỏ cho câu hỏi/dữ liệu.");
-        const reserved =
-          (budget + p.max_output + 1000) * (p.supports_tools ? 5 : 1);
-        const quota = providerQuota(p, await providerUsage(c, p.id));
+        // Only the first call is reserved here; later tool rounds reserve their own.
+        const reserved = prompt.estimate + p.max_output;
         // ai_requests is locked above, so concurrent sends cannot both pass this check.
-        for (const [period, used, cap] of [
-          ["tháng này", quota.monthUsed, quota.monthUsable],
-          ["hôm nay", quota.dayUsed, quota.dayUsable],
-        ] as const)
-          if (cap !== null && used + reserved > cap)
-            throw new ApiError(
-              429,
-              `Hạn mức token ${period} của provider ${p.name} không đủ cho lượt này: đã dùng ~${used.toLocaleString("vi-VN")} / ${cap.toLocaleString("vi-VN")} token khả dụng (đã trừ ${quota.reservePercent}% dự phòng), lượt này cần giữ chỗ ~${reserved.toLocaleString("vi-VN")}. Hãy thu hẹp phạm vi, giảm output hoặc chờ kỳ hạn mức mới.`,
-              "AI_PROVIDER_QUOTA",
-            );
+        assertQuota(
+          p,
+          providerQuota(p, await providerUsage(c, p.id)),
+          reserved,
+        );
         await reserveDaily(c, user, reserved);
         await c.query(
           "INSERT INTO ai_context_snapshots(id,owner_id,project_id,payload,hash) VALUES($1,$2,$3,$4,$5)",
@@ -1200,11 +1419,7 @@ export function researchRouter(
             p.output_price_per_million,
             p.currency,
             p.pricing_version,
-            estimateCost(
-              reserved,
-              p.max_output * (p.supports_tools ? 5 : 1),
-              p,
-            ),
+            estimateCost(prompt.estimate, p.max_output, p),
           ],
         );
         await c.query(
@@ -1253,7 +1468,9 @@ export function researchRouter(
       // otherwise upper bounds (prompt bytes + max output) for each call sent.
       chargedIn = 0,
       chargedOut = 0,
-      inFlight: { in: number; out: number } | null = null;
+      inFlight: { in: number; out: number } | null = null,
+      // Uncalibrated estimate summed over calls, compared with provider usage.
+      rawEstimated = 0;
     const toolResults: unknown[] = [];
     const heartbeat = setInterval(() => {
       void db
@@ -1327,8 +1544,22 @@ export function researchRouter(
             stream,
             ...(enableTools ? { tools, tool_choice: "auto" } : {}),
           };
+        const rawIn = estimatePromptTokens(
+            messages,
+            enableTools ? tools : undefined,
+          ),
+          estIn = calibrate(rawIn, p.token_calibration);
+        if (estIn + p.max_output > p.context_limit)
+          throw new ApiError(
+            413,
+            "Hết ngân sách context. Hãy thu hẹp phạm vi.",
+            "AI_CONTEXT_LIMIT",
+          );
+        // The first call was reserved at send time; each tool round reserves its own.
+        if (step > 0) await reserveRound(id, p, estIn + p.max_output);
+        rawEstimated += rawIn;
         attempted = true;
-        inFlight = { in: bytes(body), out: p.max_output };
+        inFlight = { in: estIn, out: p.max_output };
         const response = await callChat(p, body, signal);
         let text: string | null, toolCalls: any[] | undefined;
         if (stream) {
@@ -1442,9 +1673,17 @@ export function researchRouter(
           ],
         );
         await c.query(
-          "UPDATE ai_usage SET estimated_cost=CASE WHEN $2::boolean THEN ($3::numeric*input_price_per_million+$4::numeric*output_price_per_million)/1000000 ELSE NULL END WHERE request_id=$1",
-          [id, usageKnown, input, output],
+          "UPDATE ai_usage SET estimated_cost=CASE WHEN $2::boolean THEN ($3::numeric*input_price_per_million+$4::numeric*output_price_per_million)/1000000 ELSE NULL END,estimated_input_tokens=$5 WHERE request_id=$1",
+          [id, usageKnown, input, output, rawEstimated],
         );
+        const calibration = usageKnown
+          ? nextCalibration(p.token_calibration, input, rawEstimated)
+          : null;
+        if (calibration !== null)
+          await c.query(
+            "UPDATE ai_provider_models SET token_calibration=$3 WHERE provider_id=$1 AND model_id=$2",
+            [p.id, p.model_id, calibration],
+          );
       });
     } catch (e) {
       const error =

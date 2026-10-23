@@ -50,6 +50,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env) {
     maxFileBytes: integer("MAX_FILE_BYTES", 9_500_000, 9_500_000),
     maxImageBytes: integer("MAX_IMAGE_BYTES", 2_000_000, 9_500_000),
     concurrency: integer("MAX_HEAVY_REQUESTS", 2, 20),
+    apiRateLimit: integer("API_RATE_LIMIT", 120, 100000),
     trustProxy: env.TRUST_PROXY_HOPS
       ? integer("TRUST_PROXY_HOPS", 1, 5)
       : (false as false | number),

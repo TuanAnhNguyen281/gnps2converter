@@ -313,7 +313,7 @@ export function createApp(
     "/api",
     rateLimit({
       windowMs: 60000,
-      limit: 120,
+      limit: config.apiRateLimit,
       standardHeaders: "draft-7",
       legacyHeaders: false,
       message: { message: "Quá nhiều yêu cầu. Hãy thử lại sau." },

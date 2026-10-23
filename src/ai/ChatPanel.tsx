@@ -9,9 +9,11 @@ import type {
   Provider,
   ProviderQuota,
   Report,
+  TokenPreview,
   RequestState,
   Session,
 } from "./types";
+const fmtTokens = (n: number) => n.toLocaleString("vi-VN");
 // Sent as a normal turn: the truncated answer is in history, so the model resumes from it.
 const CONTINUE_PROMPT =
   "Tiếp tục câu trả lời trước từ đúng chỗ bị cắt, không lặp lại phần đã viết.";
@@ -32,7 +34,8 @@ export function ChatPanel({
   session: Session;
   reports: Report[];
   providers: Provider[];
-  beforeSend: () => Promise<ChatContext>;
+  // save=false: read the current context without flushing edits (used for previews).
+  beforeSend: (options?: { save?: boolean }) => Promise<ChatContext>;
   onOpenReport: (id: string, rowIds?: string[]) => Promise<void>;
   compact?: boolean;
 }) {
@@ -54,7 +57,9 @@ export function ChatPanel({
     [sourceInfo, setSourceInfo] = useState<Record<string, RequestState>>({}),
     [quotas, setQuotas] = useState<Record<string, ProviderQuota | undefined>>(
       {},
-    );
+    ),
+    [preview, setPreview] = useState<TokenPreview | null>(null),
+    [previewError, setPreviewError] = useState("");
   // Quota is shared by every chat on the provider, so re-read it after each turn.
   async function refreshQuotas() {
     try {
@@ -264,6 +269,90 @@ export function ChatPanel({
       setBusy(false);
     }
   }
+  // Shared by send and preview so both describe exactly the same request.
+  function buildPayload(text: string, context: ChatContext, retryOf?: string) {
+    const reportIds =
+      scope === "project"
+        ? chosenReports.length
+          ? chosenReports
+          : reports.map((r) => r.id)
+        : context.reportId
+          ? [context.reportId]
+          : session.active_report_id
+            ? [session.active_report_id]
+            : [];
+    if (!reportIds.length)
+      throw new Error("Hãy mở báo cáo hoặc chọn phạm vi project.");
+    if (scope === "selection" && context.selectedRowIds.length > 300)
+      throw new Error("Chọn tối đa 300 dòng hoặc chuyển sang toàn báo cáo.");
+    const expectedRevisions = Object.fromEntries(
+      reports
+        .filter((r) => reportIds.includes(r.id))
+        .map((r) => [r.id, r.revision]),
+    );
+    if (context.reportId && reportIds.includes(context.reportId))
+      expectedRevisions[context.reportId] = context.revision;
+    const [providerId, modelId] = choice.split("|");
+    return {
+      message: text,
+      ...(retryOf ? { retryOf } : {}),
+      ...(choice ? { providerId, modelId } : {}),
+      context: {
+        reportIds,
+        scope,
+        selectedRowIds: scope === "selection" ? context.selectedRowIds : [],
+        viewState: context.viewState,
+        expectedRevisions,
+      },
+    };
+  }
+  useEffect(() => {
+    if (!conversation || isArchived || active) {
+      setPreview(null);
+      return;
+    }
+    let alive = true;
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          const payload = buildPayload(
+            question,
+            await beforeSend({ save: false }),
+          );
+          const r = await jsonApi<TokenPreview>(
+            `/api/ai/conversations/${conversation}/preview`,
+            jsonBody({
+              ...payload,
+              // Unsaved edits are flushed on send; the preview only estimates size.
+              context: { ...payload.context, expectedRevisions: {} },
+            }),
+          );
+          if (alive) {
+            setPreview(r);
+            setPreviewError("");
+          }
+        } catch (e) {
+          if (alive) {
+            setPreview(null);
+            setPreviewError((e as Error).message);
+          }
+        }
+      })();
+    }, 600);
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, [
+    conversation,
+    question,
+    scope,
+    choice,
+    chosenReports,
+    reports,
+    messages.length,
+    active,
+  ]);
   async function send(text: string, retryOf?: string) {
     if (
       sending.current ||
@@ -280,40 +369,7 @@ export function ChatPanel({
     try {
       const context = await beforeSend();
       if (generation.current !== gen) return;
-      const reportIds =
-        scope === "project"
-          ? chosenReports.length
-            ? chosenReports
-            : reports.map((r) => r.id)
-          : context.reportId
-            ? [context.reportId]
-            : session.active_report_id
-              ? [session.active_report_id]
-              : [];
-      if (!reportIds.length)
-        throw new Error("Hãy mở báo cáo hoặc chọn phạm vi project.");
-      if (scope === "selection" && context.selectedRowIds.length > 300)
-        throw new Error("Chọn tối đa 300 dòng hoặc chuyển sang toàn báo cáo.");
-      const expectedRevisions = Object.fromEntries(
-        reports
-          .filter((r) => reportIds.includes(r.id))
-          .map((r) => [r.id, r.revision]),
-      );
-      if (context.reportId && reportIds.includes(context.reportId))
-        expectedRevisions[context.reportId] = context.revision;
-      const [providerId, modelId] = choice.split("|"),
-        payload = {
-          message: text,
-          ...(retryOf ? { retryOf } : {}),
-          ...(choice ? { providerId, modelId } : {}),
-          context: {
-            reportIds,
-            scope,
-            selectedRowIds: scope === "selection" ? context.selectedRowIds : [],
-            viewState: context.viewState,
-            expectedRevisions,
-          },
-        },
+      const payload = buildPayload(text, context, retryOf),
         signature = JSON.stringify(payload);
       if (!pending.current || pending.current.signature !== signature)
         pending.current = { id: crypto.randomUUID(), signature };
@@ -751,6 +807,50 @@ export function ChatPanel({
             placeholder="Nhập câu hỏi về báo cáo…"
           />
         </label>
+        {preview ? (
+          <details className={`token-preview${preview.fits ? "" : " blocked"}`}>
+            <summary>
+              Dự toán ~{fmtTokens(preview.input)} token vào · tối đa{" "}
+              {fmtTokens(preview.outputMax)} ra · giữ chỗ ~
+              {fmtTokens(preview.reserve)}
+              {preview.toolRounds && " (+ mỗi vòng công cụ)"}
+            </summary>
+            <ul>
+              <li>Hướng dẫn: ~{fmtTokens(preview.breakdown.instructions)}</li>
+              <li>
+                Dữ liệu: ~{fmtTokens(preview.breakdown.data)} ·{" "}
+                {preview.rows.sent}/{preview.rows.examined} dòng
+                {preview.rows.truncated ? " (đã rút gọn)" : ""}
+              </li>
+              <li>
+                Lịch sử: ~{fmtTokens(preview.breakdown.history)} ·{" "}
+                {preview.history.included / 2} lượt gần nhất
+                {preview.history.omitted
+                  ? `, ${preview.history.omitted / 2} lượt cũ chỉ còn trích đoạn`
+                  : ""}
+              </li>
+              <li>Câu hỏi: ~{fmtTokens(preview.breakdown.question)}</li>
+              {preview.toolRounds && (
+                <li>Mô tả công cụ: ~{fmtTokens(preview.breakdown.tools)}</li>
+              )}
+            </ul>
+            <small>
+              Ước tính{" "}
+              {preview.calibrated
+                ? "đã hiệu chỉnh theo usage thật của model"
+                : "chưa hiệu chỉnh (model chưa có lượt nào có usage)"}
+              ; số thật lấy từ provider sau khi trả lời.
+            </small>
+          </details>
+        ) : (
+          previewError &&
+          conversation && (
+            <small className="token-preview">{previewError}</small>
+          )
+        )}
+        {preview && !preview.fits && (
+          <p className="ai-error">{preview.reason}</p>
+        )}
         <div className="ai-actions">
           <button
             disabled={
@@ -759,7 +859,8 @@ export function ChatPanel({
               active ||
               isArchived ||
               session.status === "closed" ||
-              !question.trim()
+              !question.trim() ||
+              preview?.fits === false
             }
             type="submit"
           >

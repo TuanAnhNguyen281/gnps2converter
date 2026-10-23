@@ -14,7 +14,7 @@ export function ResearchWorkspace({
   compact = false,
 }: {
   reportId: string | null;
-  beforeSend: () => Promise<ChatContext>;
+  beforeSend: (options?: { save?: boolean }) => Promise<ChatContext>;
   onOpenReport: (id: string, rowIds?: string[]) => Promise<void>;
   onCreateReport: (projectId: string) => Promise<void>;
   onSettings: () => void;
@@ -169,8 +169,8 @@ export function ResearchWorkspace({
       setBusy(false);
     }
   }
-  async function context() {
-    const current = await beforeSend();
+  async function context(options?: { save?: boolean }) {
+    const current = await beforeSend(options);
     if (current.reportId && !reports.some((r) => r.id === current.reportId)) {
       if (compact)
         throw new Error(

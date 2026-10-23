@@ -1876,9 +1876,9 @@ export default function App() {
   }
 
   // Chat reads the saved revision, so flush edits first and send the grid's selected rows.
-  async function chatContext(): Promise<ChatContext> {
+  async function chatContext(options?: { save?: boolean }): Promise<ChatContext> {
     if (stage !== "results" || !result) return { reportId: null, revision: 0, selectedRowIds: [] };
-    if (saved.dirty()) await saved.saveNow();
+    if (options?.save !== false && saved.dirty()) await saved.saveNow();
     const rows = new Set<number>();
     if (gridSelection?.cells) for (const cell of gridSelection.cells) rows.add(cell.row);
     else if (gridSelection) {

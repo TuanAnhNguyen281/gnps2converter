@@ -537,3 +537,20 @@
   font-size: 12px;
   color: #a86f00;
 }
+.token-preview {
+  display: block;
+  margin: 6px 0 4px;
+  font-size: 12px;
+  color: var(--muted, #5b6b7f);
+}
+.token-preview summary {
+  cursor: pointer;
+}
+.token-preview ul {
+  margin: 6px 0;
+  padding-left: 18px;
+}
+.token-preview.blocked summary {
+  color: #a86f00;
+  font-weight: 600;
+}
