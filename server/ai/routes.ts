@@ -25,7 +25,9 @@ import {
   buildContext,
   contextSchema,
   initialContext,
+  loadReport,
   readableCitations,
+  reviewQueue,
   remapCitations,
   suggestQuestions,
   runTool,
@@ -915,6 +917,25 @@ export function researchRouter(
         return;
       }
       res.json({ conversation: c, messages, sources });
+    }),
+  );
+  // Server-computed review ranking for one report; no provider call.
+  router.get(
+    "/ai/reports/:id/review-queue",
+    route(async (req, res) => {
+      const limit = z.coerce
+        .number()
+        .int()
+        .min(1)
+        .max(50)
+        .default(10)
+        .parse(req.query.limit ?? undefined);
+      res.json(
+        reviewQueue(
+          await loadReport(db, owner(req), uuid.parse(req.params.id)),
+          limit,
+        ),
+      );
     }),
   );
   router.get(

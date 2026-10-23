@@ -916,6 +916,18 @@ describe("Research project, provider and persistent chat", () => {
       .send({ monthlyTokenLimit: null, dailyTokenLimit: null });
     expect((await send()).status).toBe(202);
   });
+  it("serves the server-side review queue only to the report owner", async () => {
+    const q = await a.get(`/api/ai/reports/${reportId}/review-queue?limit=5`);
+    expect(q.status).toBe(200);
+    expect(q.body).toMatchObject({
+      examinedRows: 1,
+      flaggedRows: 0,
+      items: [],
+    });
+    expect(
+      (await b.get(`/api/ai/reports/${reportId}/review-queue`)).status,
+    ).toBe(404);
+  });
   it("does not silently substitute zero for unknown provider usage", async () => {
     mode = "unknown";
     const r = await send();

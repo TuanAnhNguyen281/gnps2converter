@@ -4,6 +4,7 @@ import { useAccount } from "../Account";
 import { useConfirm } from "../Ui";
 import { ChatPanel, type ChatContext } from "./ChatPanel";
 import { ModelPicker } from "./AiSettings";
+import { ReviewQueue } from "./ReviewQueue";
 import type { Project, Provider, Report, Session } from "./types";
 export function ResearchWorkspace({
   reportId,
@@ -539,6 +540,17 @@ export function ResearchWorkspace({
           )}
         </aside>
         <div className="research-main">
+          {reportId && (
+            <ReviewQueue
+              reportId={reportId}
+              revision={reports.find((r) => r.id === reportId)?.revision}
+              onOpenRow={(rowId) =>
+                void onOpenReport(reportId, [rowId]).catch((e) =>
+                  setError(e.message),
+                )
+              }
+            />
+          )}
           {session && project && !project.archived_at ? (
             <ChatPanel
               key={session.id}

@@ -562,3 +562,45 @@
 .suggestion-chips button {
   font-size: 12px;
 }
+.review-queue summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.review-queue ol {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0;
+  padding-left: 20px;
+}
+.review-queue li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 8px;
+  align-items: center;
+}
+.review-queue li button {
+  justify-self: start;
+  text-align: left;
+}
+.review-queue li small {
+  grid-column: 1 / -1;
+  color: var(--muted, #5b6b7f);
+}
+.review-score {
+  min-width: 34px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 700;
+  background: color-mix(in srgb, #268a98 14%, var(--panel, #fff));
+}
+.review-score.high {
+  background: color-mix(in srgb, #c98a12 22%, var(--panel, #fff));
+  color: #a86f00;
+}
+.review-rule {
+  display: block;
+  font-size: 11px;
+  color: var(--muted, #5b6b7f);
+}
