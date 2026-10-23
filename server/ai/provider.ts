@@ -107,6 +107,30 @@ export type ProviderTransport = (
   body: unknown | undefined,
   signal: AbortSignal,
 ) => Promise<Response>;
+type PinnedAddress = { address: string; family: number };
+// Answers the socket's DNS lookup with addresses already checked as public.
+// Node ≥20 connects with autoSelectFamily and asks with {all: true}, expecting
+// an array; older callers expect a single (address, family) pair.
+export function pinnedLookup(addresses: PinnedAddress[]) {
+  return (
+    _hostname: string,
+    options: { all?: boolean; family?: number | string } | number | undefined,
+    callback: (...args: any[]) => void,
+  ) => {
+    const raw = typeof options === "number" ? options : options?.family,
+      family = raw === "IPv4" ? 4 : raw === "IPv6" ? 6 : Number(raw) || 0;
+    const usable = addresses.filter((a) => !family || a.family === family);
+    if (!usable.length)
+      return callback(
+        Object.assign(new Error("No pinned address for family"), {
+          code: "ENOTFOUND",
+        }),
+      );
+    if (typeof options === "object" && options?.all)
+      return callback(null, usable);
+    callback(null, usable[0].address, usable[0].family);
+  };
+}
 // DNS is resolved once and pinned in the actual TLS connection; no redirect is followed.
 export const secureTransport: ProviderTransport = async (
   url,
@@ -122,15 +146,13 @@ export const secureTransport: ProviderTransport = async (
       "Provider trỏ tới địa chỉ không được phép.",
       "AI_UNSAFE_HOST",
     );
-  const address = addresses[0];
   return new Promise((resolve, reject) => {
     const req = https.request(
       url,
       {
         method: body === undefined ? "GET" : "POST",
         signal,
-        lookup: (_hostname, _options, callback) =>
-          callback(null, address.address, address.family),
+        lookup: pinnedLookup(addresses),
         headers: {
           authorization: `Bearer ${apiKey}`,
           accept: "application/json",

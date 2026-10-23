@@ -51,3 +51,35 @@ it("pins the validated DNS address on the actual connection and preserves TLS ho
   expect(await boundedJson(response)).toEqual({});
   expect(mocks.lookup).toHaveBeenCalledTimes(1);
 });
+it("answers pinned lookups in both single and {all:true} forms", async () => {
+  const { pinnedLookup } = await import("./provider.js");
+  const pinned = pinnedLookup([
+    { address: "2606:4700:3031::6815:3af", family: 6 },
+    { address: "104.21.3.175", family: 4 },
+  ]);
+  const call = (options: any) =>
+    new Promise<any[]>((resolve) =>
+      pinned("motapis.com", options, (...args: any[]) => resolve(args)),
+    );
+  // Node 20+ happy eyeballs asks for every address at once.
+  expect(await call({ all: true })).toEqual([
+    null,
+    [
+      { address: "2606:4700:3031::6815:3af", family: 6 },
+      { address: "104.21.3.175", family: 4 },
+    ],
+  ]);
+  expect(await call({})).toEqual([null, "2606:4700:3031::6815:3af", 6]);
+  expect(await call({ family: 4 })).toEqual([null, "104.21.3.175", 4]);
+  expect(await call(4)).toEqual([null, "104.21.3.175", 4]);
+  const [error] = await call({ family: 6, all: true });
+  expect(error).toBeNull();
+  const [missing] = await new Promise<any[]>((resolve) =>
+    pinnedLookup([{ address: "104.21.3.175", family: 4 }])(
+      "x",
+      { family: 6 },
+      (...args: any[]) => resolve(args),
+    ),
+  );
+  expect(missing.code).toBe("ENOTFOUND");
+});
