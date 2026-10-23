@@ -76,6 +76,7 @@ export interface TokenPreview {
   history: { included: number; omitted: number };
   reports: { id: string; title: string; revision: number; rowCount: number }[];
   quota: ProviderQuota;
+  suggestions: string[];
   fits: boolean;
   reason: string | null;
 }

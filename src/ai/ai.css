@@ -559,3 +559,6 @@
   font-size: 12px;
   font-weight: 600;
 }
+.suggestion-chips button {
+  font-size: 12px;
+}

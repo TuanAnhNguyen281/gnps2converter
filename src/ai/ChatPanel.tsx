@@ -637,11 +637,13 @@ export function ChatPanel({
             <h3>Hỏi về dữ liệu nghiên cứu của bạn</h3>
             <p>Tạo hội thoại, chọn model và đặt câu hỏi về báo cáo.</p>
             <div className="ai-actions">
-              {[
-                "Tóm tắt kết quả báo cáo",
-                "Tìm các dòng có sai số ppm lớn",
-                "So sánh các báo cáo đã chọn",
-              ].map((q) => (
+              {(
+                preview?.suggestions ?? [
+                  "Tóm tắt kết quả báo cáo",
+                  "Tìm các dòng có sai số ppm lớn",
+                  "So sánh các báo cáo đã chọn",
+                ]
+              ).map((q) => (
                 <button key={q} onClick={() => setQuestion(q)}>
                   {q}
                 </button>
@@ -811,6 +813,17 @@ export function ChatPanel({
             placeholder="Nhập câu hỏi về báo cáo…"
           />
         </label>
+        {!question.trim() &&
+          messages.length > 0 &&
+          !!preview?.suggestions.length && (
+            <div className="ai-actions suggestion-chips">
+              {preview.suggestions.map((q) => (
+                <button type="button" key={q} onClick={() => setQuestion(q)}>
+                  {q}
+                </button>
+              ))}
+            </div>
+          )}
         {preview && (
           <p className="send-scope">
             Sẽ gửi:{" "}

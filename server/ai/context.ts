@@ -654,3 +654,62 @@ export function remapCitations(
       : "[nguồn ngoài phạm vi hiện tại]";
   });
 }
+interface ReadableReport {
+  id: string;
+  title: string;
+  rows: Record<string, any>[];
+}
+// For exports read outside the app: [R1-12] -> [Report title · dòng TSV 12 (compound)].
+export function readableCitations(
+  content: string,
+  citations: Citation[] | null | undefined,
+  reports: ReadableReport[],
+) {
+  if (!citations?.length) return content;
+  const byRef = new Map(citations.map((c) => [c.ref, c]));
+  return content.replace(citationPattern, (_match, group: string) => {
+    const parts = splitRefs(group).map((ref) => {
+      const c = byRef.get(ref),
+        report = c?.reportId
+          ? reports.find((r) => r.id === c.reportId)
+          : undefined;
+      if (!c || !report) return `${ref} (không tồn tại)`;
+      if (!c.rowId) return report.title;
+      const row = report.rows.find((r) => r.id === c.rowId);
+      return `${report.title} · ${row?.sourceTsvRow ? `dòng TSV ${row.sourceTsvRow}` : `dòng ${ref}`}${row?.compoundName ? ` (${row.compoundName})` : ""}`;
+    });
+    return `[${parts.join("; ")}]`;
+  });
+}
+// Starter questions derived from the rows in scope, so they point at real issues.
+export function suggestQuestions(ctx: ResearchContext) {
+  const selected = ctx.selection.selectedRowIds,
+    inScope = ctx.reports.flatMap((r) =>
+      ctx.selection.scope === "selection" && selected.length
+        ? r.rows.filter((row) => selected.includes(row.id))
+        : r.rows,
+    ),
+    out: string[] = [];
+  if (
+    ctx.selection.scope === "selection" &&
+    selected.length === 1 &&
+    inScope[0]
+  )
+    out.push(
+      `Đánh giá độ tin cậy định danh của ${inScope[0].compoundName ?? "dòng đang chọn"}`,
+    );
+  const highPpm = inScope.filter((r) => {
+    const v = ppmOf(r);
+    return v !== null && Math.abs(v) > 10;
+  }).length;
+  if (highPpm) out.push(`Vì sao ${highPpm} dòng có sai số trên 10 ppm?`);
+  const ambiguous = inScope.filter((r) => r.status === "ambiguous").length;
+  if (ambiguous)
+    out.push(`Giải thích ${ambiguous} dòng ambiguous và cách xác minh`);
+  const unmatched = inScope.filter((r) => r.status === "unmatched").length;
+  if (unmatched) out.push(`${unmatched} dòng chưa khớp: nên kiểm tra gì?`);
+  if (ctx.reports.length >= 2)
+    out.push(`So sánh ${ctx.reports[0].title} và ${ctx.reports[1].title}`);
+  out.push("Dòng nào nên duyệt lại trước?", "Tóm tắt kết quả báo cáo");
+  return [...new Set(out)].slice(0, 4);
+}

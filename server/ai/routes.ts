@@ -25,7 +25,9 @@ import {
   buildContext,
   contextSchema,
   initialContext,
+  readableCitations,
   remapCitations,
+  suggestQuestions,
   runTool,
   sourceReferences,
   toPrompt,
@@ -878,16 +880,25 @@ export function researchRouter(
         ),
         messages = (
           await db.query(
-            `SELECT m.sequence,m.role,m.content,m.status,r.model_id,r.provider_name,r.context_snapshot_id FROM ai_messages m JOIN ai_requests r ON r.id=m.request_id WHERE m.conversation_id=$1 ORDER BY m.sequence`,
+            `SELECT m.sequence,m.role,m.content,m.citations,m.status,r.model_id,r.provider_name,r.context_snapshot_id FROM ai_messages m JOIN ai_requests r ON r.id=m.request_id WHERE m.conversation_id=$1 ORDER BY m.sequence`,
             [c.id],
           )
         ).rows;
-      const sources = (
+      const snapshots = (
         await db.query(
           `SELECT DISTINCT s.id,s.payload->'reports' AS reports FROM ai_context_snapshots s JOIN ai_requests r ON r.context_snapshot_id=s.id WHERE r.conversation_id=$1`,
           [c.id],
         )
-      ).rows.map((s) => ({
+      ).rows;
+      const bySnapshot = new Map(snapshots.map((s) => [s.id, s.reports]));
+      for (const m of messages)
+        // Refs only make sense inside the app; exports spell out report and row.
+        m.content_readable = readableCitations(
+          m.content,
+          m.citations,
+          bySnapshot.get(m.context_snapshot_id) ?? [],
+        );
+      const sources = snapshots.map((s) => ({
         snapshotId: s.id,
         reports: s.reports.map((r: any) => ({
           id: r.id,
@@ -899,7 +910,7 @@ export function researchRouter(
         res
           .type("text/markdown")
           .send(
-            `# ${c.title}\n\n${messages.map((m) => `## ${m.role} · ${m.model_id} · ${m.status}\n\n${m.content}`).join("\n\n")}\n\n## Nguồn\n\n${JSON.stringify(sources, null, 2)}`,
+            `# ${c.title}\n\n${messages.map((m) => `## ${m.role} · ${m.model_id} · ${m.status}\n\n${m.content_readable}`).join("\n\n")}\n\n## Nguồn\n\n${JSON.stringify(sources, null, 2)}`,
           );
         return;
       }
@@ -1131,6 +1142,7 @@ export function researchRouter(
         );
         return {
           prompt,
+          suggestions: suggestQuestions(ctx),
           reports: ctx.reports.map((r) => ({
             id: r.id,
             title: r.title,
@@ -1187,6 +1199,7 @@ export function researchRouter(
         },
         history: { included: prompt.included, omitted: prompt.omitted },
         reports: preview.reports,
+        suggestions: preview.suggestions,
         quota,
         fits: !blocked && !tooLarge,
         reason: tooLarge
