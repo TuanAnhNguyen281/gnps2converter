@@ -1,3 +1,14 @@
+## Nâng cấp AI giai đoạn 4 — phản hồi, tra cứu hóa học, ảnh phổ — 23/10/2026
+
+**Trạng thái: Đã triển khai trên nhánh `feat/ai-phase4` (chưa merge/push). Người dùng chọn 3 mục: tra cứu PubChem/NPClassifier, phản hồi + tiến trình, vision.**
+
+- Phản hồi (migration 0009 `ai_feedback`): 👍/👎 + góp ý cho câu trả lời đã xong; xuất của chính mình; quản trị chỉ thấy số đếm theo model. Tiến trình công cụ hiển thị từ tool runs khi lượt đang chạy. Đã sửa lỗi form góp ý gắn nhầm vào câu hỏi (cùng request_id) phát hiện khi QA.
+- Tra cứu: `lookup_compound` chỉ có khi project bật `allow_external_lookup`; kiểm tra định dạng InChIKey/SMILES, User-Agent rõ ràng, timeout 8s, 200KB, không theo redirect, cache 30 ngày (`ai_lookup_cache`). Kiểm tra mạng từ máy dev: NPClassifier trả kết quả; PubChem chuyển hướng sang trang chặn lạm dụng của NCBI — ứng dụng báo “blocked”, cần thử lại trên server deploy.
+- Vision: cờ `supports_vision`, Chat thử gửi PNG 1×1; “Kèm ảnh mirror plot” cho 1 dòng của báo cáo GNPS2 Task, PNG từ `metabolomics-usi.gnps2.org/png/mirror/` (đã thử endpoint: HTTP 200, ~57KB). Ảnh tính cố định ~1.100 token, không tính vào ngân sách byte; chỉ lưu USI trong `ai_requests.attachments`.
+- Kiểm thử: 110 test; QA research-preview: 👍/👎 + góp ý, công tắc tra cứu, ô kèm ảnh bật khi chọn 1 dòng (dự toán +1.100), lỗi rõ ràng khi báo cáo không phải GNPS2 Task. Chưa thử với model vision thật và báo cáo GNPS2 thật.
+
+---
+
 ## Nâng cấp AI giai đoạn 3 — hàng đợi bền vững, cache token, quản trị — 23/10/2026
 
 **Trạng thái: Đã triển khai trên nhánh `feat/ai-phase3` (chưa merge/push).**

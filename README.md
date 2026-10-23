@@ -38,6 +38,12 @@ Mỗi provider có hạn mức token theo tài khoản provider (mặc định g
 
 **Trích dẫn ⚠**: “Kiểm chứng” hiện số liệu gốc từ snapshot (không gọi AI); “Nhờ AI kiểm tra lại” gửi lượt mới chỉ kèm đúng các dòng đó. File xuất Markdown/JSON đổi `[R1-12]` thành tên báo cáo · dòng TSV.
 
+**Phản hồi**: mỗi câu trả lời có 👍/👎 (👎 kèm góp ý tùy chọn); Cài đặt AI có nút tải phản hồi của bạn để bổ sung ca kiểm thử. Khi AI đang tra dữ liệu, chat hiện “Đang tra dữ liệu: …” theo các công cụ đã gọi.
+
+**Tra cứu PubChem/NPClassifier** (bật theo từng project, mặc định tắt): công cụ `lookup_compound` gửi InChIKey của dòng tới PubChem và SMILES tới NPClassifier (GNPS2), không gửi dữ liệu báo cáo khác; kết quả được cache 30 ngày. Nếu NCBI chặn máy chủ, kết quả ghi “blocked”.
+
+**Ảnh phổ (vision)**: đánh dấu “Ảnh” cho model hỗ trợ ảnh (Chat thử có kiểm tra). Với báo cáo nhập từ GNPS2 Task, chọn đúng một dòng và tick “Kèm ảnh mirror plot”: server dựng USI từ task, `#Scan#`, `SpectrumID`, tải PNG từ metabolomics-usi.gnps2.org và gửi kèm câu hỏi (~1.100 token). Chỉ USI được lưu lại; ảnh bị xóa cùng prompt khi lượt kết thúc.
+
 **Kết quả và thảo luận**: “Dùng làm nháp thảo luận” lưu câu trả lời (trích dẫn đã đổi sang tên báo cáo/dòng) thành nháp gắn với báo cáo; sửa ở mục nháp; xuất Word sẽ thêm mục “KẾT QUẢ VÀ THẢO LUẬN” cuối tài liệu. “Bỏ khỏi Word” để xóa.
 
 **Thống kê sử dụng 30 ngày** nằm trong Cài đặt AI (chỉ tài khoản của bạn), kèm số token vào provider báo là lấy từ cache. Quản trị viên (`ADMIN_USER_IDS`, hoặc `ADMIN_EMAILS` với email đã xác minh qua Google) thấy thêm khối **Quản trị · AI toàn hệ thống**: hàng đợi, usage theo tài khoản/model và lỗi gần đây; không bao giờ có nội dung chat. **Đánh giá chất lượng**: `npx tsx scripts/ai-eval.ts` chạy 5 câu hỏi cố định trên báo cáo mẫu bằng provider thật (đặt `AI_EVAL_BASE_URL`, `AI_EVAL_API_KEY`, `AI_EVAL_MODEL`, tùy chọn `AI_EVAL_TOOLS`/`AI_EVAL_STREAM`; tốn token), ghi kết quả vào `qa/ai-eval/`; `--mock` chỉ kiểm tra bộ chạy.
@@ -51,7 +57,7 @@ Mỗi provider có hạn mức token theo tài khoản provider (mặc định g
 
 ### Cấu hình máy chủ AI
 
-Chạy `npm run db:migrate` để áp dụng `0002_research_ai.sql` đến `0008_ai_request_queue.sql` (chỉ thêm bảng/cột/ràng buộc; không chuyển hoặc xóa báo cáo cũ). Khai báo các biến trong `.env.example`:
+Chạy `npm run db:migrate` để áp dụng `0002_research_ai.sql` đến `0009_ai_feedback_lookup_vision.sql` (chỉ thêm bảng/cột/ràng buộc; không chuyển hoặc xóa báo cáo cũ). Khai báo các biến trong `.env.example`:
 
 ```text
 AI_ENCRYPTION_KEY=<64 ký tự hex ngẫu nhiên, tương đương 32 byte>

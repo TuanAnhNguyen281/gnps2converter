@@ -994,7 +994,8 @@ export function ChatPanel({
                 )}
               </div>
             )}
-            {m.request_id in feedbackDraft && (
+            {/* The question and its answer share request_id; feedback belongs to the answer. */}
+            {m.role === "assistant" && m.request_id in feedbackDraft && (
               <form
                 className="feedback-form"
                 onSubmit={(e) => {
