@@ -353,9 +353,17 @@ beforeAll(async () => {
       destroy: async () => {},
     },
     transport,
-    async (url) => {
-      lookups.push(url);
-      return Response.json({});
+    {
+      lookup: async (url) => {
+        lookups.push(url);
+        return Response.json({});
+      },
+      spectrum: async (url) => {
+        lookups.push(url);
+        return new Response(Buffer.from("89504e470d0a1a0a", "hex"), {
+          headers: { "content-type": "image/png" },
+        });
+      },
     },
   );
   a = supertest.agent(app.app);
@@ -1151,6 +1159,102 @@ describe("Research project, provider and persistent chat", () => {
       modelId: "test-model",
     });
     mode = "success";
+  });
+  it("attaches the GNPS2 mirror plot for one selected row on vision models", async () => {
+    const task = "2515573ac8c24ec8b85f553aad9b440e";
+    const gnps = await app.reports!.create(
+      userA,
+      "GNPS task report",
+      {
+        ...result,
+        task,
+        rows: [
+          {
+            ...row,
+            id: "row-g",
+            sourceMetadata: {
+              "#Scan#": "33",
+              SpectrumID: "CCMSLIB00005720803",
+            },
+          },
+        ],
+      } as any,
+      randomUUID(),
+    );
+    await post(`/api/projects/${projectId}/reports`, {
+      reportId: gnps.reportId,
+    });
+    const body = () => ({
+      clientRequestId: randomUUID(),
+      message: "Nhận xét mirror plot",
+      attachSpectrum: true,
+      context: {
+        reportIds: [gnps.reportId],
+        scope: "selection",
+        selectedRowIds: ["row-g"],
+      },
+    });
+    const refused = await post(
+      `/api/ai/conversations/${conversationId}/messages`,
+      body(),
+    );
+    expect(refused.status).toBe(400);
+    expect(refused.body.code).toBe("AI_NO_VISION");
+    await post(`/api/ai/providers/${providerId}/models`, {
+      modelId: "test-model",
+      supportsVision: true,
+    });
+    const preview = await post(
+      `/api/ai/conversations/${conversationId}/preview`,
+      body(),
+    );
+    expect(preview.body).toMatchObject({
+      image: 1100,
+      supportsVision: true,
+      fits: true,
+    });
+    mode = "success";
+    captured = [];
+    lookups.length = 0;
+    const sent = await post(
+      `/api/ai/conversations/${conversationId}/messages`,
+      body(),
+    );
+    expect(sent.status).toBe(202);
+    await finish(sent.body.requestId);
+    expect(lookups[0]).toContain("/png/mirror/?usi1=");
+    expect(decodeURIComponent(lookups[0])).toContain(`TASK-${task}`);
+    const question = captured[0].messages.at(-1);
+    expect(question.content[1].image_url.url).toMatch(
+      /^data:image\/png;base64,/,
+    );
+    const listed = (
+      await a.get(`/api/ai/conversations/${conversationId}/messages`)
+    ).body.items.find(
+      (m: any) => m.request_id === sent.body.requestId && m.role === "user",
+    );
+    expect(listed.attachments[0]).toMatchObject({
+      type: "mirror_plot",
+      scan: "33",
+      spectrumId: "CCMSLIB00005720803",
+    });
+    // A report row without scan/SpectrumID cannot have a mirror plot.
+    const plain = await post(
+      `/api/ai/conversations/${conversationId}/messages`,
+      {
+        ...body(),
+        context: {
+          reportIds: [reportId],
+          scope: "selection",
+          selectedRowIds: ["row-a"],
+        },
+      },
+    );
+    expect(plain.status).toBe(400);
+    expect(plain.body.code).toBe("AI_NO_SPECTRUM");
+    await post(`/api/ai/providers/${providerId}/models`, {
+      modelId: "test-model",
+    });
   });
   it("stores owner feedback on finished answers and exports it", async () => {
     const answers = (

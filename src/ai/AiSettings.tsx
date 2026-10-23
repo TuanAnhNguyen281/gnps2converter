@@ -206,6 +206,7 @@ const describeProbe = (c: ProbeResult) =>
         : "lỗi"
     }`,
     `Tools: ${c.tools === "ok" ? "OK" : "không hỗ trợ"}`,
+    `Ảnh: ${c.vision === "ok" ? "OK" : "không hỗ trợ"}`,
     ...c.notes,
   ].join(" · ");
 export function AiSettings() {
@@ -568,7 +569,7 @@ export function AiSettings() {
                           jsonBody({ modelId: m.model_id }),
                         ),
                       (r: { checks: ProbeResult }) =>
-                        `Đã chat thử. ${describeProbe(r.checks)}. Bật Tools/Stream theo kết quả này.`,
+                        `Đã chat thử. ${describeProbe(r.checks)}. Bật Tools/Stream/Ảnh theo kết quả này.`,
                     );
                 }}
               />
@@ -608,6 +609,7 @@ function ModelEditor({
     [enabled, setEnabled] = useState(model?.enabled ?? true),
     [tools, setTools] = useState(model?.supports_tools ?? false),
     [stream, setStream] = useState(model?.supports_stream ?? false),
+    [vision, setVision] = useState(model?.supports_vision ?? false),
     [context, setContext] = useState(model?.context_limit ?? 16000),
     [output, setOutput] = useState(model?.max_output ?? 2000),
     [inputPrice, setInputPrice] = useState(
@@ -628,6 +630,7 @@ function ModelEditor({
           enabled,
           supportsTools: tools,
           supportsStream: stream,
+          supportsVision: vision,
           contextLimit: context,
           maxOutput: output,
           inputPricePerMillion: inputPrice === "" ? null : Number(inputPrice),
@@ -681,8 +684,16 @@ function ModelEditor({
           />
           Stream
         </label>
+        <label className="ai-check">
+          <input
+            type="checkbox"
+            checked={vision}
+            onChange={(e) => setVision(e.target.checked)}
+          />
+          Ảnh
+        </label>
       </div>
-      <small>Chỉ bật Tools/Stream khi provider/model hỗ trợ.</small>
+      <small>Chỉ bật Tools/Stream/Ảnh khi provider/model hỗ trợ.</small>
       <div className="ai-actions">
         <label>
           Context

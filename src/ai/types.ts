@@ -27,6 +27,7 @@ export interface Model {
   enabled: boolean;
   supports_tools: boolean;
   supports_stream: boolean;
+  supports_vision?: boolean;
   context_limit: number;
   max_output: number;
   input_price_per_million: string | null;
@@ -65,6 +66,8 @@ export interface TokenPreview {
   outputMax: number;
   reserve: number;
   toolRounds: boolean;
+  image: number;
+  supportsVision: boolean;
   contextLimit: number;
   breakdown: {
     instructions: number;
@@ -87,6 +90,7 @@ export interface ProbeResult {
   streamOptions: "accepted" | "rejected" | null;
   streamUsage: boolean | null;
   tools: "ok" | "failed";
+  vision?: "ok" | "failed";
   usage: boolean;
   notes: string[];
 }
@@ -118,6 +122,14 @@ export interface Message {
   feedback_rating?: 1 | -1 | null;
   feedback_comment?: string | null;
   tool_progress?: string[];
+  attachments?:
+    | {
+        type: string;
+        compoundName?: string;
+        scan?: string;
+        spectrumId?: string;
+      }[]
+    | null;
 }
 export interface RequestState {
   contextInfo?: {

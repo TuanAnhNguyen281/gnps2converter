@@ -54,7 +54,7 @@ export function createApp(
   db?: Database,
   provider?: MediaProvider,
   aiTransport?: ProviderTransport,
-  lookupFetch?: LookupFetch,
+  aiFetchers?: { lookup?: LookupFetch; spectrum?: LookupFetch },
 ) {
   const media = db
     ? new MediaService(db, config, provider ?? cloudinaryProvider(config))
@@ -324,7 +324,7 @@ export function createApp(
   );
   let active = 0;
   if (db && reports)
-    app.use("/api", researchRouter(db, config, aiTransport, lookupFetch));
+    app.use("/api", researchRouter(db, config, aiTransport, aiFetchers));
   app.use(
     [
       "/api/analyze",

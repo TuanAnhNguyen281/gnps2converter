@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { Connection, Database } from "../db/index.js";
 import { ApiError } from "../errors.js";
+import { gnpsTask } from "./spectrum.js";
 import {
   REVIEW_RULE,
   metaText,
@@ -24,6 +25,8 @@ export const contextSchema = z.object({
 export type ContextSelection = z.infer<typeof contextSchema>;
 export interface ContextReport {
   id: string;
+  // GNPS2 task id when the report was imported from a task (for mirror plots).
+  task?: string | null;
   title: string;
   revision: number;
   sourceUrl: string | null;
@@ -116,6 +119,7 @@ export async function buildContext(
       );
   const reports: ContextReport[] = records.map((r) => ({
     id: r.id,
+    task: gnpsTask(r.data, r.source_url),
     title: r.title,
     revision: r.revision,
     sourceUrl: r.source_url,
@@ -1045,6 +1049,7 @@ export async function loadReport(
   if (!r) throw new ApiError(404, "Không tìm thấy báo cáo.");
   return {
     id: r.id,
+    task: gnpsTask(r.data, r.source_url),
     title: r.title,
     revision: r.revision,
     sourceUrl: r.source_url,

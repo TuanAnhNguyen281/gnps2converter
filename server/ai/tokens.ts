@@ -11,11 +11,29 @@ export function estimateTextTokens(text: string) {
   }
   return Math.ceil(ascii / 3 + other / 1.5);
 }
+// Providers bill an image by its tiles, not its base64 length; a mirror plot
+// is about this size at "auto" detail.
+export const IMAGE_TOKENS = 1100;
+// JSON for size/budget checks with inline image data replaced by a marker.
+export const withoutImages = (value: unknown) =>
+  JSON.stringify(value, (key, v) =>
+    key === "url" && typeof v === "string" && v.startsWith("data:image/")
+      ? "<image>"
+      : v,
+  );
+const imageCount = (m: any) =>
+  Array.isArray(m?.content)
+    ? m.content.filter((part: any) => part?.type === "image_url").length
+    : 0;
 // Chat framing adds a few tokens per message; tool schemas are sent as JSON.
 export function estimatePromptTokens(messages: unknown[], tools?: unknown) {
   return (
     messages.reduce<number>(
-      (n, m) => n + 4 + estimateTextTokens(JSON.stringify(m)),
+      (n, m) =>
+        n +
+        4 +
+        estimateTextTokens(withoutImages(m)) +
+        imageCount(m) * IMAGE_TOKENS,
       3,
     ) + (tools ? estimateTextTokens(JSON.stringify(tools)) : 0)
   );

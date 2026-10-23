@@ -94,6 +94,7 @@ export function ChatPanel({
     [checked, setChecked] = useState<Record<string, CitationRow[]>>({}),
     [notice, setNotice] = useState(""),
     [feedbackDraft, setFeedbackDraft] = useState<Record<string, string>>({}),
+    [attachSpectrum, setAttachSpectrum] = useState(false),
     [previewError, setPreviewError] = useState("");
   // Quota is shared by every chat on the provider, so re-read it after each turn.
   async function refreshQuotas() {
@@ -342,6 +343,13 @@ export function ChatPanel({
     const [providerId, modelId] = choice.split("|");
     return {
       message: text,
+      // The mirror plot needs exactly one selected row.
+      ...(attachSpectrum &&
+      !rows &&
+      effectiveScope === "selection" &&
+      context.selectedRowIds.length === 1
+        ? { attachSpectrum: true }
+        : {}),
       ...(retryOf ? { retryOf } : {}),
       ...(choice ? { providerId, modelId } : {}),
       context: {
@@ -401,6 +409,7 @@ export function ChatPanel({
     messages.length,
     active,
     contextKey,
+    attachSpectrum,
   ]);
   // Copies a finished answer into the report's Word draft for the user to edit.
   async function saveAsDraft(requestId: string) {
@@ -503,6 +512,7 @@ export function ChatPanel({
       pending.current = null;
       if (generation.current !== gen) return;
       setQuestion("");
+      setAttachSpectrum(false);
       const loaded = await loadMessages(conversation);
       if (generation.current !== gen) return;
       setMessages(loaded.items);
@@ -779,6 +789,15 @@ export function ChatPanel({
           <article key={m.id} className={`chat-message ${m.role}`}>
             <header>
               {m.role === "user" ? "Bạn" : `${m.provider_name} · ${m.model_id}`}{" "}
+              {m.role === "user" &&
+                m.attachments?.some((x) => x.type === "mirror_plot") && (
+                  <small>
+                    📈 kèm mirror plot
+                    {m.attachments[0].compoundName
+                      ? ` · ${m.attachments[0].compoundName}`
+                      : ""}
+                  </small>
+                )}
               {m.role === "assistant" && (
                 <small>
                   {(
@@ -1105,6 +1124,18 @@ export function ChatPanel({
               ))}
             </div>
           )}
+        {preview?.supportsVision && (
+          <label className="ai-check attach-spectrum">
+            <input
+              type="checkbox"
+              checked={attachSpectrum}
+              disabled={scope !== "selection" || preview.rows.examined !== 1}
+              onChange={(e) => setAttachSpectrum(e.target.checked)}
+            />
+            Kèm ảnh mirror plot của dòng đang chọn (~
+            {fmtTokens(1100)} token)
+          </label>
+        )}
         {preview && (
           <p className="send-scope">
             Sẽ gửi:{" "}

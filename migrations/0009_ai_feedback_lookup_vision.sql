@@ -12,3 +12,5 @@ CREATE TABLE ai_lookup_cache (
 );
 -- Models that accept image input (mirror plots).
 ALTER TABLE ai_provider_models ADD COLUMN supports_vision boolean NOT NULL DEFAULT false;
+-- What was attached to the question (e.g. the mirror plot's USIs); the image itself is not kept.
+ALTER TABLE ai_requests ADD COLUMN attachments jsonb;

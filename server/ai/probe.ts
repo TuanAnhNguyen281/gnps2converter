@@ -7,6 +7,7 @@ export interface ProbeResult {
   streamOptions: "accepted" | "rejected" | null;
   streamUsage: boolean | null;
   tools: "ok" | "failed";
+  vision: "ok" | "failed";
   usage: boolean;
   // Provider usage where reported, otherwise prompt + max_tokens per call.
   tokens: number;
@@ -118,8 +119,38 @@ export async function probeModel(
     tokens += 150;
     notes.push(`Tools lỗi: ${message(e)}`);
   }
+  // A 1x1 PNG: providers without image input reject the content part.
+  let vision: ProbeResult["vision"] = "failed";
+  try {
+    const json = await boundedJson(
+      await call({
+        model,
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Reply with OK." },
+              {
+                type: "image_url",
+                image_url: {
+                  url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==",
+                },
+              },
+            ],
+          },
+        ],
+        max_tokens: 16,
+      }),
+    );
+    tokens += spentOn(json.usage, 120);
+    if (typeof json.choices?.[0]?.message?.content === "string") vision = "ok";
+  } catch (e) {
+    tokens += 120;
+    notes.push(`Ảnh: ${message(e)}`);
+  }
   return {
     content: content.slice(0, 200),
+    vision,
     stream,
     streamOptions,
     streamUsage,

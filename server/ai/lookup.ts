@@ -5,7 +5,10 @@ import { metaText } from "./review.js";
 // External reference data for one row. It only sends the structure
 // identifiers (InChIKey, SMILES), never report contents, and only when the
 // project opted in. Results are cached so repeated questions do not re-query.
-export type LookupFetch = (url: string, signal: AbortSignal) => Promise<Response>;
+export type LookupFetch = (
+  url: string,
+  signal: AbortSignal,
+) => Promise<Response>;
 const USER_AGENT =
   "GNPS2-Converter/1.0 (research assistant; cached, low-volume lookups)";
 export const defaultLookupFetch: LookupFetch = (url, signal) =>
