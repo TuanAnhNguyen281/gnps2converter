@@ -8,7 +8,10 @@ export type Query = <T extends pg.QueryResultRow = pg.QueryResultRow>(
 ) => Promise<pg.QueryResult<T>>;
 export interface Connection {
   query: Query;
-  release(): void;
+  // pg destroys the client instead of pooling it when given an error.
+  release(error?: Error): void;
+  on?(event: "error", listener: (error: Error) => void): unknown;
+  off?(event: "error", listener: (error: Error) => void): unknown;
 }
 export interface Database {
   query: Query;
@@ -33,15 +36,27 @@ export async function transaction<T>(
   run: (client: Connection) => Promise<T>,
 ) {
   const client = await db.connect();
+  // The pool only listens on idle clients. Without this, a connection the
+  // server drops mid-transaction (Neon does) is an unhandled 'error' event
+  // that kills the process; the pending query rejects on its own.
+  let broken: Error | undefined;
+  const onError = (error: Error) => {
+    broken = error;
+    console.error("[database] Connection interrupted during transaction");
+  };
+  client.on?.("error", onError);
   try {
     await client.query("BEGIN");
     const result = await run(client);
     await client.query("COMMIT");
     return result;
   } catch (error) {
-    await client.query("ROLLBACK");
+    if (!broken)
+      await client.query("ROLLBACK").catch((e: Error) => (broken = e));
     throw error;
   } finally {
-    client.release();
+    client.off?.("error", onError);
+    // A broken client is destroyed instead of going back to the pool.
+    client.release(broken);
   }
 }
