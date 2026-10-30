@@ -3,16 +3,36 @@ import { jsonApi, jsonBody } from "../api";
 import { useConfirm } from "../Ui";
 import type { Provider, Model, ProbeResult, ProviderQuota } from "./types";
 import { AdminUsage } from "./AdminUsage";
+// Display name for a "providerId|modelId" choice; undefined when unknown.
+export function modelLabel(providers: Provider[], choice: string) {
+  const [providerId, modelId] = choice.split("|"),
+    provider = providers.find((p) => p.id === providerId);
+  if (!provider) return undefined;
+  return (
+    provider.models.find((m) => m.model_id === modelId)?.display_name ?? modelId
+  );
+}
+// Fallback when no default is saved: the first enabled model, "" if none.
+export function firstModel(providers: Provider[]) {
+  for (const p of providers) {
+    const m = p.enabled && p.models.find((x) => x.enabled);
+    if (m) return `${p.id}|${m.model_id}`;
+  }
+  return "";
+}
 export function ModelPicker({
   providers,
   value,
   onChange,
   disabled = false,
+  defaultLabel,
 }: {
   providers: Provider[];
   value: string;
   onChange: (v: string) => void;
   disabled?: boolean;
+  // Names the model the empty choice falls back to.
+  defaultLabel?: string;
 }) {
   return (
     <select
@@ -21,7 +41,9 @@ export function ModelPicker({
       onChange={(e) => onChange(e.target.value)}
       disabled={disabled}
     >
-      <option value="">Theo cấu hình mặc định</option>
+      <option value="">
+        {defaultLabel ? `${defaultLabel} (mặc định)` : "Theo cấu hình mặc định"}
+      </option>
       {providers
         .filter((p) => p.enabled)
         .map((p) => (
@@ -224,8 +246,21 @@ export function AiSettings() {
     [reserve, setReserve] = useState(MOTAPI_PRESET.reserve),
     [defaultModel, setDefaultModel] = useState(""),
     [usage, setUsage] = useState<any>(null),
-    [summary, setSummary] = useState<UsageSummary | null>(null);
+    [summary, setSummary] = useState<UsageSummary | null>(null),
+    // Unsaved model edits, by provider id then model id.
+    [drafts, setDrafts] = useState<Record<string, Record<string, ModelValue>>>(
+      {},
+    );
   const confirm = useConfirm();
+  function setDraft(providerId: string, modelId: string, v: ModelValue | null) {
+    setDrafts((all) => {
+      const own = { ...all[providerId] };
+      if (v) own[modelId] = v;
+      else if (modelId in own) delete own[modelId];
+      else return all;
+      return { ...all, [providerId]: own };
+    });
+  }
   async function refresh() {
     const [p, s, u, sum] = await Promise.all([
       jsonApi<Provider[]>("/api/ai/providers"),
@@ -535,6 +570,27 @@ export function AiSettings() {
               >
                 Tải model
               </button>
+              <button
+                type="button"
+                disabled={busy || !Object.keys(drafts[p.id] ?? {}).length}
+                title="Lưu mọi model đã sửa của provider này trong một lần"
+                onClick={() => {
+                  const models = Object.values(drafts[p.id] ?? {});
+                  void act(
+                    () =>
+                      jsonApi(
+                        `/api/ai/providers/${p.id}/models`,
+                        jsonBody({ models }, "PUT"),
+                      ),
+                    (r: { saved: number }) => `Đã lưu ${r.saved} model.`,
+                  );
+                }}
+              >
+                Lưu tất cả
+                {drafts[p.id] && Object.keys(drafts[p.id]).length
+                  ? ` (${Object.keys(drafts[p.id]).length})`
+                  : ""}
+              </button>
             </div>
           </div>
           <div className="model-grid">
@@ -543,6 +599,7 @@ export function AiSettings() {
                 key={m.model_id}
                 model={m}
                 disabled={busy}
+                onDraft={(modelId, v) => setDraft(p.id, modelId, v)}
                 save={(value) =>
                   act(
                     () =>
@@ -593,16 +650,61 @@ export function AiSettings() {
     </section>
   );
 }
+type ModelValue = ReturnType<typeof modelValue>;
+function modelValue(f: {
+  id: string;
+  name: string;
+  enabled: boolean;
+  tools: boolean;
+  stream: boolean;
+  vision: boolean;
+  context: number;
+  output: number;
+  inputPrice: string | number;
+  outputPrice: string | number;
+  currency: string;
+}) {
+  return {
+    modelId: f.id,
+    displayName: f.name || f.id,
+    enabled: f.enabled,
+    supportsTools: f.tools,
+    supportsStream: f.stream,
+    supportsVision: f.vision,
+    contextLimit: f.context,
+    maxOutput: f.output,
+    inputPricePerMillion: f.inputPrice === "" ? null : Number(f.inputPrice),
+    outputPricePerMillion: f.outputPrice === "" ? null : Number(f.outputPrice),
+    currency: f.currency,
+  };
+}
+const savedValue = (m: Model) =>
+  modelValue({
+    id: m.model_id,
+    name: m.display_name,
+    enabled: m.enabled,
+    tools: m.supports_tools,
+    stream: m.supports_stream,
+    vision: m.supports_vision ?? false,
+    context: m.context_limit,
+    output: m.max_output,
+    inputPrice: m.input_price_per_million ?? "",
+    outputPrice: m.output_price_per_million ?? "",
+    currency: m.currency ?? "USD",
+  });
 function ModelEditor({
   model,
   disabled,
   save,
   test,
+  onDraft,
 }: {
   model?: Model;
   disabled: boolean;
   save: (v: unknown) => Promise<void>;
   test?: () => Promise<void>;
+  // Reports the edited value, or null once it matches what is saved.
+  onDraft?: (modelId: string, value: ModelValue | null) => void;
 }) {
   const [id, setId] = useState(model?.model_id ?? ""),
     [name, setName] = useState(model?.display_name ?? ""),
@@ -619,28 +721,43 @@ function ModelEditor({
       model?.output_price_per_million ?? "",
     ),
     [currency, setCurrency] = useState(model?.currency ?? "USD");
+  const value = modelValue({
+      id,
+      name,
+      enabled,
+      tools,
+      stream,
+      vision,
+      context,
+      output,
+      inputPrice,
+      outputPrice,
+      currency,
+    }),
+    draft = JSON.stringify(value),
+    dirty = !!model && draft !== JSON.stringify(savedValue(model));
+  // value is re-derived each render; draft is its stable identity.
+  useEffect(() => {
+    if (model && onDraft) onDraft(model.model_id, dirty ? value : null);
+  }, [draft, dirty]);
+  useEffect(
+    () => () => {
+      if (model && onDraft) onDraft(model.model_id, null);
+    },
+    [],
+  );
   return (
     <form
-      className="model-editor"
+      className={dirty ? "model-editor is-dirty" : "model-editor"}
       onSubmit={(e) => {
         e.preventDefault();
-        void save({
-          modelId: id,
-          displayName: name || id,
-          enabled,
-          supportsTools: tools,
-          supportsStream: stream,
-          supportsVision: vision,
-          contextLimit: context,
-          maxOutput: output,
-          inputPricePerMillion: inputPrice === "" ? null : Number(inputPrice),
-          outputPricePerMillion:
-            outputPrice === "" ? null : Number(outputPrice),
-          currency,
-        });
+        void save(value);
       }}
     >
-      <h3>{model ? model.display_name : "Nhập model thủ công"}</h3>
+      <h3>
+        {model ? model.display_name : "Nhập model thủ công"}
+        {dirty && <span className="model-dirty"> · chưa lưu</span>}
+      </h3>
       <label>
         Mã model
         <input

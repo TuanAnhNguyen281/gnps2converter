@@ -1,0 +1,32 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "api",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["tsx", "watch", "server/index.ts"],
+      "port": 8787
+    },
+    {
+      "name": "web",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["vite", "--port", "5173", "--strictPort"],
+      "port": 5173,
+      "autoPort": false
+    },
+    {
+      "name": "qa-api",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["tsx", "scripts/research-preview.ts"],
+      "port": 8789
+    },
+    {
+      "name": "qa-web",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["vite", "--host", "127.0.0.1", "--port", "5193", "--strictPort"],
+      "env": { "DEV_API_TARGET": "http://localhost:8789" },
+      "port": 5193,
+      "autoPort": false
+    }
+  ]
+}

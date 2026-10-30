@@ -532,6 +532,106 @@ describe("Research project, provider and persistent chat", () => {
       ).status,
     ).toBe(404);
   });
+  it("saves several models in one request, all or nothing", async () => {
+    const put = (body: object) =>
+      a
+        .put(`/api/ai/providers/${providerId}/models`)
+        .set("X-CSRF-Token", csrfA)
+        .send(body);
+    const saved = await put({
+      models: [
+        { modelId: "bulk-a", displayName: "Bulk A", contextLimit: 32000 },
+        { modelId: "bulk-b", supportsTools: true },
+      ],
+    });
+    expect(saved.status).toBe(200);
+    expect(saved.body.saved).toBe(2);
+    const bad = await put({
+      models: [
+        { modelId: "bulk-a", displayName: "Changed" },
+        { modelId: "bulk-c", contextLimit: 1 },
+      ],
+    });
+    expect(bad.status).toBe(400);
+    const rows = (
+      await db.query(
+        "SELECT model_id,display_name,context_limit,supports_tools FROM ai_provider_models WHERE provider_id=$1 AND model_id LIKE 'bulk-%' ORDER BY model_id",
+        [providerId],
+      )
+    ).rows;
+    expect(rows).toEqual([
+      {
+        model_id: "bulk-a",
+        display_name: "Bulk A",
+        context_limit: 32000,
+        supports_tools: false,
+      },
+      {
+        model_id: "bulk-b",
+        display_name: "bulk-b",
+        context_limit: 16000,
+        supports_tools: true,
+      },
+    ]);
+    expect((await put({ models: [] })).status).toBe(400);
+  });
+  it("starts a project from a report and a session from its first question", async () => {
+    const source = (
+      await app.reports!.create(userA, "Báo cáo nguồn", result, randomUUID())
+    ).reportId;
+    const p = await post("/api/projects", { fromReportId: source });
+    expect(p.status).toBe(201);
+    expect(p.body.name).toBe("Báo cáo nguồn");
+    expect(
+      (await a.get(`/api/projects/${p.body.id}/reports`)).body.map(
+        (r: any) => r.id,
+      ),
+    ).toEqual([source]);
+    // Already moved: a second project cannot take it.
+    expect((await post("/api/projects", { fromReportId: source })).status).toBe(
+      409,
+    );
+    expect((await post("/api/projects", {})).status).toBe(400);
+    const question = "Hợp chất nào có MQScore thấp? Giải thích giúp tôi.";
+    expect(
+      (
+        await post(`/api/projects/${p.body.id}/research-sessions`, {
+          question,
+          activeReportId: otherReport,
+        })
+      ).status,
+    ).toBe(404);
+    const s = await post(`/api/projects/${p.body.id}/research-sessions`, {
+      question,
+      activeReportId: source,
+    });
+    expect(s.status).toBe(201);
+    expect(s.body.title).toBe("Hợp chất nào có MQScore thấp?");
+    expect(s.body.active_report_id).toBe(source);
+    const before = calls;
+    const titled = await post(
+      `/api/research-sessions/${s.body.id}/auto-title`,
+      {
+        question,
+      },
+    );
+    expect(titled.status).toBe(200);
+    expect(titled.body.title).toBe("Có 1 hợp chất theo snapshot");
+    expect(calls).toBe(before + 1);
+    expect(
+      (
+        await db.query(
+          "SELECT count(*)::int AS n FROM ai_provider_usage_events WHERE kind='title'",
+        )
+      ).rows[0].n,
+    ).toBe(1);
+    // No longer the draft title (summarised or renamed): nothing is called.
+    const again = await post(`/api/research-sessions/${s.body.id}/auto-title`, {
+      question,
+    });
+    expect(again.body.title).toBe("Có 1 hợp chất theo snapshot");
+    expect(calls).toBe(before + 1);
+  });
   it("rejects CSRF, unsafe endpoints and cross-project context", async () => {
     expect(
       (await a.post("/api/projects").send({ name: "Missing csrf" })).status,

@@ -33,6 +33,7 @@ import {
   streamCompletion,
   type ProviderTransport,
 } from "./provider.js";
+import { cleanTitle, draftTitle, titleMessages } from "./session-title.js";
 import {
   buildContext,
   contextSchema,
@@ -85,6 +86,30 @@ const token = (x: unknown) =>
   typeof x === "number" && Number.isInteger(x) && x >= 0 && x < 2147483647
     ? x
     : null;
+// Any edit bumps the pricing version and clears verification.
+function saveModel(
+  db: Database | Connection,
+  providerId: string,
+  b: z.infer<typeof modelSchema>,
+) {
+  return db.query(
+    `INSERT INTO ai_provider_models(provider_id,model_id,display_name,enabled,supports_tools,supports_stream,context_limit,max_output,input_price_per_million,output_price_per_million,currency,pricing_version,supports_vision) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,1,$12) ON CONFLICT(provider_id,model_id) DO UPDATE SET display_name=EXCLUDED.display_name,enabled=EXCLUDED.enabled,supports_tools=EXCLUDED.supports_tools,supports_stream=EXCLUDED.supports_stream,supports_vision=EXCLUDED.supports_vision,context_limit=EXCLUDED.context_limit,max_output=EXCLUDED.max_output,input_price_per_million=EXCLUDED.input_price_per_million,output_price_per_million=EXCLUDED.output_price_per_million,currency=EXCLUDED.currency,pricing_version=ai_provider_models.pricing_version+1,verified_at=NULL`,
+    [
+      providerId,
+      b.modelId,
+      b.displayName ?? b.modelId,
+      b.enabled,
+      b.supportsTools,
+      b.supportsStream,
+      b.contextLimit,
+      b.maxOutput,
+      b.inputPricePerMillion,
+      b.outputPricePerMillion,
+      b.currency,
+      b.supportsVision,
+    ],
+  );
+}
 
 export function researchRouter(
   db: Database,
@@ -306,9 +331,15 @@ export function researchRouter(
     route(async (req, res) => {
       const b = z
           .object({
-            name: title,
+            name: title.optional(),
             description: z.string().max(4000).default(""),
             researchGoal: z.string().max(4000).default(""),
+            // Starts the project from a report: named after it unless a name
+            // is given, and the report is moved into the new project.
+            fromReportId: uuid.optional(),
+          })
+          .refine((x) => x.name || x.fromReportId, {
+            message: "Cần tên project hoặc báo cáo nguồn.",
           })
           .parse(req.body),
         user = owner(req);
@@ -321,16 +352,40 @@ export function researchRouter(
         ).rows[0].n >= 100
       )
         throw new ApiError(429, "Tối đa 100 project mỗi tài khoản.");
-      res
-        .status(201)
-        .json(
-          (
-            await db.query(
-              "INSERT INTO projects(id,owner_id,name,description,research_goal) VALUES($1,$2,$3,$4,$5) RETURNING *",
-              [randomUUID(), user, b.name, b.description, b.researchGoal],
-            )
-          ).rows[0],
-        );
+      const project = await transaction(db, async (c) => {
+        const report = b.fromReportId
+          ? (
+              await c.query(
+                "SELECT id,title,project_id FROM reports WHERE id=$1 AND owner_id=$2 FOR UPDATE",
+                [b.fromReportId, user],
+              )
+            ).rows[0]
+          : null;
+        if (b.fromReportId && !report)
+          throw new ApiError(404, "Không tìm thấy báo cáo.");
+        if (report?.project_id)
+          throw new ApiError(409, "Báo cáo đã thuộc project khác.");
+        const created = (
+          await c.query(
+            "INSERT INTO projects(id,owner_id,name,description,research_goal) VALUES($1,$2,$3,$4,$5) RETURNING *",
+            [
+              randomUUID(),
+              user,
+              // The schema requires a name or a report.
+              b.name ?? String(report!.title).trim().slice(0, 160),
+              b.description,
+              b.researchGoal,
+            ],
+          )
+        ).rows[0];
+        if (report)
+          await c.query("UPDATE reports SET project_id=$1 WHERE id=$2", [
+            created.id,
+            report.id,
+          ]);
+        return created;
+      });
+      res.status(201).json(project);
     }),
   );
   router.patch(
@@ -425,15 +480,41 @@ export function researchRouter(
     route(async (req, res) => {
       const user = owner(req),
         p = await owned("projects", req.params.id as string, user),
-        b = z.object({ title }).parse(req.body);
+        b = z
+          .object({
+            title: title.optional(),
+            // A session started by its first question is titled from it.
+            question: z.string().trim().min(1).max(6000).optional(),
+            activeReportId: uuid.optional(),
+          })
+          .refine((x) => x.title || x.question, {
+            message: "Cần tên phiên hoặc câu hỏi đầu tiên.",
+          })
+          .parse(req.body);
       if (p.archived_at) throw new ApiError(409, "Project đã lưu trữ.");
+      if (
+        b.activeReportId &&
+        !(
+          await db.query(
+            "SELECT id FROM reports WHERE id=$1 AND owner_id=$2 AND project_id=$3",
+            [b.activeReportId, user, p.id],
+          )
+        ).rows.length
+      )
+        throw new ApiError(404, "Báo cáo không thuộc project này.");
       res
         .status(201)
         .json(
           (
             await db.query(
-              "INSERT INTO research_sessions(id,owner_id,project_id,title) VALUES($1,$2,$3,$4) RETURNING *",
-              [randomUUID(), user, p.id, b.title],
+              "INSERT INTO research_sessions(id,owner_id,project_id,title,active_report_id) VALUES($1,$2,$3,$4,$5) RETURNING *",
+              [
+                randomUUID(),
+                user,
+                p.id,
+                b.title ?? draftTitle(b.question!),
+                b.activeReportId ?? null,
+              ],
             )
           ).rows[0],
         );
@@ -605,24 +686,26 @@ export function researchRouter(
           owner(req),
         ),
         b = modelSchema.parse(req.body);
-      await db.query(
-        `INSERT INTO ai_provider_models(provider_id,model_id,display_name,enabled,supports_tools,supports_stream,context_limit,max_output,input_price_per_million,output_price_per_million,currency,pricing_version,supports_vision) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,1,$12) ON CONFLICT(provider_id,model_id) DO UPDATE SET display_name=EXCLUDED.display_name,enabled=EXCLUDED.enabled,supports_tools=EXCLUDED.supports_tools,supports_stream=EXCLUDED.supports_stream,supports_vision=EXCLUDED.supports_vision,context_limit=EXCLUDED.context_limit,max_output=EXCLUDED.max_output,input_price_per_million=EXCLUDED.input_price_per_million,output_price_per_million=EXCLUDED.output_price_per_million,currency=EXCLUDED.currency,pricing_version=ai_provider_models.pricing_version+1,verified_at=NULL`,
-        [
-          p.id,
-          b.modelId,
-          b.displayName ?? b.modelId,
-          b.enabled,
-          b.supportsTools,
-          b.supportsStream,
-          b.contextLimit,
-          b.maxOutput,
-          b.inputPricePerMillion,
-          b.outputPricePerMillion,
-          b.currency,
-          b.supportsVision,
-        ],
-      );
+      await saveModel(db, p.id, b);
       res.sendStatus(204);
+    }),
+  );
+  // Saves every edited model of a provider at once; all or nothing.
+  router.put(
+    "/ai/providers/:id/models",
+    route(async (req, res) => {
+      const p = await owned(
+          "ai_providers",
+          req.params.id as string,
+          owner(req),
+        ),
+        { models } = z
+          .object({ models: z.array(modelSchema).min(1).max(300) })
+          .parse(req.body);
+      await transaction(db, async (c) => {
+        for (const m of models) await saveModel(c, p.id, m);
+      });
+      res.json({ saved: models.length });
     }),
   );
   async function callProvider(
@@ -818,6 +901,78 @@ export function researchRouter(
         [user, b.scope, scopeId, b.providerId, b.modelId],
       );
       res.sendStatus(204);
+    }),
+  );
+  // Replaces the draft title of a session started by a question with a short
+  // model-written summary. Best effort: any failure keeps the draft title.
+  router.post(
+    "/research-sessions/:id/auto-title",
+    route(async (req, res) => {
+      const user = owner(req),
+        s = await owned("research_sessions", req.params.id as string, user),
+        b = z
+          .object({
+            question: z.string().trim().min(1).max(6000),
+            providerId: uuid.optional(),
+            modelId: z.string().min(1).max(180).optional(),
+          })
+          .parse(req.body);
+      // Renamed by the user, or already summarised: leave it.
+      if (s.title !== draftTitle(b.question)) return res.json(s);
+      try {
+        const p = await resolveModel(
+            user,
+            { project_id: s.project_id, research_session_id: s.id },
+            b,
+          ),
+          messages = titleMessages(b.question),
+          estimate = estimatePromptTokens(messages) + 60;
+        await transaction(db, async (c) => {
+          await c.query("LOCK TABLE ai_requests IN SHARE ROW EXCLUSIVE MODE");
+          assertQuota(
+            p,
+            providerQuota(p, await providerUsage(c, p.id)),
+            estimate,
+          );
+        });
+        const json = await boundedJson(
+            await callProvider(
+              p,
+              "chat/completions",
+              {
+                model: p.model_id,
+                messages,
+                max_tokens: 60,
+                temperature: 0.2,
+                stream: false,
+              },
+              AbortSignal.timeout(20000),
+            ),
+            200000,
+          ),
+          spent = Number(json.usage?.total_tokens);
+        await db.query(
+          "INSERT INTO ai_provider_usage_events(id,provider_id,kind,tokens) VALUES($1,$2,'title',$3)",
+          [
+            randomUUID(),
+            p.id,
+            Number.isInteger(spent) && spent >= 0 ? spent : estimate,
+          ],
+        );
+        const next = cleanTitle(json.choices?.[0]?.message?.content);
+        if (!next) return res.json(s);
+        const updated = (
+          await db.query(
+            // Compare-and-set so a rename made meanwhile wins.
+            "UPDATE research_sessions SET title=$3 WHERE id=$1 AND owner_id=$2 AND title=$4 RETURNING *",
+            [s.id, user, next, s.title],
+          )
+        ).rows[0];
+        res.json(updated ?? (await owned("research_sessions", s.id, user)));
+      } catch (e) {
+        if (!(e instanceof ApiError)) throw e;
+        res.json(s);
+      }
     }),
   );
   router.get(
@@ -1314,11 +1469,11 @@ export function researchRouter(
         content: remapCitations(t.content, t.citations, ctx),
       },
     ]);
+    // One system message: several OpenAI-compatible providers read only the first.
     const messages: any[] = [
-      { role: "system", content: systemPrompt },
       {
         role: "system",
-        content: `UNTRUSTED RESEARCH DATA\n${toPrompt(ctx, initial)}`,
+        content: `${systemPrompt}\n\nUNTRUSTED RESEARCH DATA\n${toPrompt(ctx, initial)}`,
       },
       { role: "user", content: message },
     ];
@@ -1334,7 +1489,7 @@ export function researchRouter(
         budget
       )
         break;
-      messages.splice(2, 0, ...pair);
+      messages.splice(1, 0, ...pair);
       included += 2;
     }
     const total = Number(
@@ -1373,17 +1528,15 @@ export function researchRouter(
           ],
         );
       }
-      const compressed = {
-        role: "system",
-        content: `HISTORICAL UNTRUSTED EXCERPTS (partial, ${omitted} older messages excluded, current report snapshot overrides historical numbers): ${JSON.stringify(excerpts)}`,
-      };
+      const compressed = `\n\nHISTORICAL UNTRUSTED EXCERPTS (partial, ${omitted} older messages excluded, current report snapshot overrides historical numbers): ${JSON.stringify(excerpts)}`;
       if (
         bytes(messages) +
-          bytes(compressed) +
+          Buffer.byteLength(compressed) +
           (p.supports_tools ? bytes(toolsFor(ctx)) : 0) <
         budget
       )
-        messages.splice(2, 0, compressed);
+        // Appended to the single system message (see above).
+        messages[0].content += compressed;
     }
     const toolDefs = p.supports_tools ? toolsFor(ctx) : undefined;
     return {

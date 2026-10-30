@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { apiUrl, jsonApi, jsonBody, apiFetch } from "../api";
-import { ModelPicker, QuotaMeter } from "./AiSettings";
+import { ModelPicker, QuotaMeter, firstModel, modelLabel } from "./AiSettings";
 import { useConfirm } from "../Ui";
 import { Markdown } from "./Markdown";
 import { DRAFT_EVENT } from "./DiscussionDraft";
+import { ContextMeter } from "./ContextMeter";
 import type {
   Citation,
   Conversation,
@@ -16,6 +17,11 @@ import type {
   Session,
 } from "./types";
 const fmtTokens = (n: number) => n.toLocaleString("vi-VN");
+// A conversation started by a question is named after it.
+const conversationTitle = (text: string) => {
+  const line = text.replace(/\s+/g, " ").trim();
+  return line.length > 80 ? `${line.slice(0, 79).trimEnd()}…` : line;
+};
 const TOOL_LABELS: Record<string, string> = {
   get_project_overview: "tổng quan project",
   list_project_reports: "danh sách báo cáo",
@@ -60,8 +66,14 @@ export function ChatPanel({
   onOpenReport,
   compact = false,
   contextKey,
+  initialQuestion,
+  initialModel,
 }: {
   session: Session;
+  // Sent once on mount: the question that started this session.
+  initialQuestion?: string;
+  // Model picked for that question ("providerId|modelId").
+  initialModel?: string;
   reports: Report[];
   providers: Provider[];
   // save=false: read the current context without flushing edits (used for previews).
@@ -78,7 +90,7 @@ export function ChatPanel({
     [messages, setMessages] = useState<Message[]>([]),
     [cursor, setCursor] = useState<number | null>(null),
     [question, setQuestion] = useState(""),
-    [choice, setChoice] = useState(""),
+    [choice, setChoice] = useState(initialModel ?? ""),
     [scope, setScope] = useState<"selection" | "report" | "project">(
       "selection",
     ),
@@ -95,6 +107,8 @@ export function ChatPanel({
     [notice, setNotice] = useState(""),
     [feedbackDraft, setFeedbackDraft] = useState<Record<string, string>>({}),
     [attachSpectrum, setAttachSpectrum] = useState(false),
+    // Conversation whose "start a new chat" hint was dismissed.
+    [hintDismissed, setHintDismissed] = useState(""),
     [previewError, setPreviewError] = useState("");
   // Quota is shared by every chat on the provider, so re-read it after each turn.
   async function refreshQuotas() {
@@ -112,7 +126,17 @@ export function ChatPanel({
     stream = useRef<EventSource | null>(null),
     sending = useRef(false),
     pending = useRef<{ id: string; signature: string } | null>(null),
-    polling = useRef<ReturnType<typeof setTimeout> | null>(null);
+    polling = useRef<ReturnType<typeof setTimeout> | null>(null),
+    initial = useRef(initialQuestion),
+    switcher = useRef<HTMLDetailsElement>(null),
+    textarea = useRef<HTMLTextAreaElement>(null),
+    log = useRef<HTMLDivElement>(null),
+    // Keep the newest message in view unless the reader scrolled up.
+    following = useRef(true);
+  useEffect(() => {
+    if (following.current && log.current)
+      log.current.scrollTop = log.current.scrollHeight;
+  }, [messages]);
   const confirm = useConfirm();
   const effectiveChoice = choice || defaultChoice;
   const [effectiveProviderId, effectiveModelId] = effectiveChoice.split("|");
@@ -138,7 +162,9 @@ export function ChatPanel({
           ) ??
           rows.find((s) => s.scope === "account");
         setDefaultChoice(
-          setting ? `${setting.provider_id}|${setting.model_id}` : "",
+          setting
+            ? `${setting.provider_id}|${setting.model_id}`
+            : firstModel(providers),
         );
       })
       .catch(() => {});
@@ -163,16 +189,23 @@ export function ChatPanel({
     setRequest(null);
     setSourceInfo({});
     setError("");
-    setChoice("");
+    setChoice(initial.current ? (initialModel ?? "") : "");
     setChosenReports([]);
     pending.current = null;
     void jsonApi<Conversation[]>(
       `/api/research-sessions/${session.id}/conversations`,
     )
       .then((rows) => {
-        if (alive) {
-          setConversations(rows);
-          setConversation(rows.find((c) => !c.archived_at)?.id ?? "");
+        if (!alive) return;
+        setConversations(rows);
+        const open = rows.find((c) => !c.archived_at)?.id ?? "";
+        setConversation(open);
+        const first = initial.current;
+        initial.current = undefined;
+        // Left in the box so a failed send can be retried.
+        if (first && !open) {
+          setQuestion(first);
+          void send(first);
         }
       })
       .catch((e) => {
@@ -289,23 +322,16 @@ export function ChatPanel({
       if (polling.current) clearTimeout(polling.current);
     };
   }, [conversation]);
-  async function newConversation() {
+  // A new chat is only a blank draft; the first question creates it on the server.
+  function newConversation() {
     if (sending.current) return;
-    setBusy(true);
-    setError("");
-    try {
-      const c = await jsonApi<Conversation>(
-        `/api/research-sessions/${session.id}/conversations`,
-        jsonBody({}),
-      );
-      setConversations((prev) => [c, ...prev]);
-      setConversation(c.id);
-      pending.current = null;
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
+    pending.current = null;
+    setConversation("");
+    setQuestion("");
+    textarea.current?.focus();
+  }
+  function closeSwitcher() {
+    if (switcher.current) switcher.current.open = false;
   }
   // Shared by send and preview so both describe exactly the same request.
   function buildPayload(
@@ -340,7 +366,8 @@ export function ChatPanel({
     );
     if (context.reportId && reportIds.includes(context.reportId))
       expectedRevisions[context.reportId] = context.revision;
-    const [providerId, modelId] = choice.split("|");
+    // Sent explicitly so the fallback model works with no saved default.
+    const [providerId, modelId] = effectiveChoice.split("|");
     return {
       message: text,
       // The mirror plot needs exactly one selected row.
@@ -351,7 +378,7 @@ export function ChatPanel({
         ? { attachSpectrum: true }
         : {}),
       ...(retryOf ? { retryOf } : {}),
-      ...(choice ? { providerId, modelId } : {}),
+      ...(effectiveChoice ? { providerId, modelId } : {}),
       context: {
         reportIds,
         scope: effectiveScope,
@@ -489,7 +516,6 @@ export function ChatPanel({
     if (
       sending.current ||
       active ||
-      !conversation ||
       !text.trim() ||
       session.status !== "active"
     )
@@ -503,21 +529,36 @@ export function ChatPanel({
       if (generation.current !== gen) return;
       const payload = buildPayload(text, context, retryOf, rows),
         signature = JSON.stringify(payload);
+      // No conversation yet: the first question starts one.
+      const created = conversation
+        ? null
+        : await jsonApi<Conversation>(
+            `/api/research-sessions/${session.id}/conversations`,
+            jsonBody({ title: conversationTitle(text) }),
+          );
+      if (generation.current !== gen) return;
+      const target = created?.id ?? conversation;
       if (!pending.current || pending.current.signature !== signature)
         pending.current = { id: crypto.randomUUID(), signature };
       const r = await jsonApi<{ requestId: string }>(
-        `/api/ai/conversations/${conversation}/messages`,
+        `/api/ai/conversations/${target}/messages`,
         jsonBody({ clientRequestId: pending.current.id, ...payload }),
       );
       pending.current = null;
       if (generation.current !== gen) return;
       setQuestion("");
       setAttachSpectrum(false);
-      const loaded = await loadMessages(conversation);
+      if (created) {
+        // Switching conversations loads its messages and follows the answer.
+        setConversations((prev) => [created, ...prev]);
+        setConversation(created.id);
+        return;
+      }
+      const loaded = await loadMessages(target);
       if (generation.current !== gen) return;
       setMessages(loaded.items);
       setCursor(loaded.nextCursor);
-      observe(r.requestId, gen, conversation);
+      observe(r.requestId, gen, target);
     } catch (e) {
       if (generation.current === gen) setError((e as Error).message);
     } finally {
@@ -549,6 +590,26 @@ export function ChatPanel({
       setError((e as Error).message);
     }
   }
+  // Makes the chat's chosen model the session default (kept after reload).
+  async function rememberModel() {
+    const [providerId, modelId] = choice.split("|");
+    try {
+      await jsonApi(
+        "/api/ai/settings",
+        jsonBody({
+          scope: "session",
+          scopeId: session.id,
+          providerId,
+          modelId,
+        }),
+      );
+      setDefaultChoice(choice);
+      setChoice("");
+      setNotice("Đã ghi nhớ model cho phiên này.");
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
   async function rename() {
     const value = window.prompt(
       "Tên hội thoại",
@@ -566,176 +627,143 @@ export function ChatPanel({
       }
   }
   const isArchived = !!conversations.find((c) => c.id === conversation)
-    ?.archived_at;
+      ?.archived_at,
+    compose = busy || active || isArchived || session.status === "closed",
+    canSend = !compose && !!question.trim() && preview?.fits !== false;
+  const defaultLabel = modelLabel(providers, defaultChoice);
+  // The box grows with its text up to the CSS max-height.
+  useEffect(() => {
+    const el = textarea.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [question]);
   return (
     <section className="ai-chat" aria-label="Chat nghiên cứu">
-      <div className="ai-card-heading">
-        <div>
-          <h2>Trợ lý nghiên cứu</h2>
-          <small>
-            {session.title} ·{" "}
-            {session.status === "closed"
-              ? "phiên đã đóng"
-              : "dữ liệu theo phiên"}
-          </small>
-        </div>
-        <button
-          disabled={busy || active || session.status === "closed"}
-          onClick={() => void newConversation()}
-        >
-          Hội thoại mới
-        </button>
-      </div>
-      <details className="chat-context-options" open={!compact}>
-        <summary>Phạm vi dữ liệu & model</summary>
-        <div className="ai-chat-controls">
-          <label>
-            Tìm hội thoại
+      <header className="chat-topbar">
+        <details className="chat-switcher" ref={switcher}>
+          <summary>
+            <span className="chat-title">
+              {conversations.find((c) => c.id === conversation)?.title ??
+                "Hội thoại mới"}
+              {isArchived ? " · lưu trữ" : ""}
+            </span>
+            <span aria-hidden="true" className="chat-caret">
+              ▾
+            </span>
+            <small>
+              {session.title}
+              {session.status === "closed" ? " · phiên đã đóng" : ""}
+            </small>
+          </summary>
+          <div className="chat-menu">
             <input
+              aria-label="Tìm hội thoại"
               value={conversationSearch}
               onChange={(e) => setConversationSearch(e.target.value)}
-              placeholder="Tên hội thoại"
+              placeholder="Tìm hội thoại…"
             />
-          </label>
-          <label>
-            Hội thoại
-            <select
-              aria-label="Lịch sử hội thoại"
-              value={conversation}
-              disabled={busy}
-              onChange={(e) => {
-                pending.current = null;
-                setConversation(e.target.value);
-              }}
-            >
-              <option value="">Tạo hội thoại mới để bắt đầu</option>
+            <div className="chat-menu-list" role="list">
               {conversations
-                .filter(
-                  (c) =>
-                    c.id === conversation ||
-                    c.title
-                      .toLowerCase()
-                      .includes(conversationSearch.toLowerCase()),
+                .filter((c) =>
+                  c.title
+                    .toLowerCase()
+                    .includes(conversationSearch.toLowerCase()),
                 )
                 .map((c) => (
-                  <option key={c.id} value={c.id}>
+                  <button
+                    key={c.id}
+                    type="button"
+                    role="listitem"
+                    disabled={busy}
+                    className={c.id === conversation ? "active" : ""}
+                    onClick={() => {
+                      pending.current = null;
+                      setConversation(c.id);
+                      closeSwitcher();
+                    }}
+                  >
                     {c.title}
                     {c.archived_at ? " · lưu trữ" : ""}
-                  </option>
+                  </button>
                 ))}
-            </select>
-          </label>
-          <label>
-            Model
-            <ModelPicker
-              providers={providers}
-              value={choice}
-              onChange={setChoice}
-              disabled={busy || active}
-            />
-          </label>
-          <label>
-            Phạm vi
-            <select
-              aria-label="Phạm vi dữ liệu"
-              value={scope}
-              disabled={busy || active}
-              onChange={(e) => setScope(e.target.value as typeof scope)}
-            >
-              <option value="selection">Các dòng đang chọn</option>
-              <option value="report">Báo cáo đang mở</option>
-              <option value="project">Các báo cáo trong project</option>
-            </select>
-          </label>
-          {scope === "project" && (
-            <fieldset>
-              <legend>
-                Chọn báo cáo (không chọn = toàn project, tối đa 10)
-              </legend>
-              {reports.map((r) => (
-                <label key={r.id} className="ai-check">
-                  <input
-                    type="checkbox"
-                    disabled={busy || active}
-                    checked={chosenReports.includes(r.id)}
-                    onChange={(e) =>
-                      setChosenReports((prev) =>
-                        e.target.checked
-                          ? [...prev, r.id]
-                          : prev.filter((id) => id !== r.id),
+              {!conversations.length && <small>Chưa có hội thoại nào.</small>}
+            </div>
+            {conversation && (
+              <div className="chat-menu-actions">
+                <button type="button" onClick={() => void rename()}>
+                  Đổi tên
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void exportChat("markdown")}
+                >
+                  Xuất Markdown
+                </button>
+                <button type="button" onClick={() => void exportChat("json")}>
+                  Xuất JSON
+                </button>
+                <button
+                  type="button"
+                  disabled={busy || active}
+                  onClick={() =>
+                    void jsonApi(
+                      `/api/ai/conversations/${conversation}`,
+                      jsonBody({ archived: !isArchived }, "PATCH"),
+                    )
+                      .then(loadConversations)
+                      .catch((e) => setError(e.message))
+                  }
+                >
+                  {isArchived ? "Mở lại" : "Lưu trữ"}
+                </button>
+                <button
+                  type="button"
+                  className="danger"
+                  disabled={busy || active}
+                  onClick={() =>
+                    void (async () => {
+                      closeSwitcher();
+                      if (
+                        !(await confirm({
+                          title: "Xóa hội thoại?",
+                          message:
+                            "Tin nhắn và snapshot của hội thoại này sẽ bị xóa. Báo cáo nghiên cứu được giữ nguyên; bạn có thể xuất lịch sử trước.",
+                          accept: "Xóa hội thoại",
+                          danger: true,
+                        }))
                       )
-                    }
-                  />
-                  {r.title}
-                </label>
-              ))}
-            </fieldset>
-          )}
-        </div>
-      </details>
-      <small className="ai-disclosure">
-        Model hiệu lực:{" "}
-        {effectiveProvider
-          ? `${effectiveProvider.name} · ${effectiveModelId}`
-          : "Chưa cấu hình"}
-        . Khi gửi, dữ liệu trong phạm vi trên được chuyển tới provider đã chọn.
-        Không có dòng chọn thì lấy tổng hợp báo cáo; AI nêu rõ dữ liệu bị giới
-        hạn.
-      </small>
-      {quotas[effectiveProviderId] && (
-        <QuotaMeter quota={quotas[effectiveProviderId]!} compact />
-      )}
-      {conversation && (
-        <div className="ai-actions">
-          <button onClick={() => void rename()}>Đổi tên</button>
-          <button onClick={() => void exportChat("markdown")}>
-            Xuất Markdown
-          </button>
-          <button onClick={() => void exportChat("json")}>Xuất JSON</button>
-          <button
-            disabled={busy || active}
-            onClick={() =>
-              void (async () => {
-                if (
-                  !(await confirm({
-                    title: "Xóa hội thoại?",
-                    message:
-                      "Tin nhắn và snapshot của hội thoại này sẽ bị xóa. Báo cáo nghiên cứu được giữ nguyên; bạn có thể xuất lịch sử trước.",
-                    accept: "Xóa hội thoại",
-                    danger: true,
-                  }))
-                )
-                  return;
-                try {
-                  await jsonApi(`/api/ai/conversations/${conversation}`, {
-                    method: "DELETE",
-                  });
-                  setConversation("");
-                  setMessages([]);
-                  await loadConversations();
-                } catch (e) {
-                  setError((e as Error).message);
-                }
-              })()
-            }
-          >
-            Xóa hội thoại
-          </button>
-          <button
-            disabled={busy || active}
-            onClick={() =>
-              void jsonApi(
-                `/api/ai/conversations/${conversation}`,
-                jsonBody({ archived: !isArchived }, "PATCH"),
-              )
-                .then(loadConversations)
-                .catch((e) => setError(e.message))
-            }
-          >
-            {isArchived ? "Mở lại" : "Lưu trữ"}
-          </button>
-        </div>
-      )}
+                        return;
+                      try {
+                        await jsonApi(`/api/ai/conversations/${conversation}`, {
+                          method: "DELETE",
+                        });
+                        setConversation("");
+                        setMessages([]);
+                        await loadConversations();
+                      } catch (e) {
+                        setError((e as Error).message);
+                      }
+                    })()
+                  }
+                >
+                  Xóa hội thoại
+                </button>
+              </div>
+            )}
+          </div>
+        </details>
+        <button
+          type="button"
+          className="chat-new"
+          disabled={
+            busy || active || session.status === "closed" || !conversation
+          }
+          onClick={newConversation}
+        >
+          + Hội thoại mới
+        </button>
+      </header>
       {error && (
         <p className="ai-error" role="alert">
           {error}
@@ -746,7 +774,17 @@ export function ChatPanel({
           {notice}
         </p>
       )}
-      <div className="chat-messages" role="log" aria-label="Tin nhắn">
+      <div
+        className="chat-messages"
+        role="log"
+        aria-label="Tin nhắn"
+        ref={log}
+        onScroll={(e) => {
+          const el = e.currentTarget;
+          following.current =
+            el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+        }}
+      >
         <button
           hidden={!cursor}
           onClick={() => {
@@ -767,10 +805,16 @@ export function ChatPanel({
           Tải tin nhắn cũ
         </button>
         {!messages.length && (
-          <div className="chat-empty">
-            <h3>Hỏi về dữ liệu nghiên cứu của bạn</h3>
-            <p>Tạo hội thoại, chọn model và đặt câu hỏi về báo cáo.</p>
-            <div className="ai-actions">
+          <div className="chat-empty chat-welcome">
+            <span className="chat-avatar large" aria-hidden="true">
+              ✦
+            </span>
+            <h3>Hôm nay bạn muốn tìm hiểu gì trong dữ liệu?</h3>
+            <p>
+              Hỏi về báo cáo đang mở, các dòng đang chọn hoặc cả project. Câu
+              trả lời trích dẫn từng dòng dữ liệu để bạn kiểm chứng.
+            </p>
+            <div className="ai-actions suggestion-chips">
               {(
                 preview?.suggestions ?? [
                   "Tóm tắt kết quả báo cáo",
@@ -778,7 +822,14 @@ export function ChatPanel({
                   "So sánh các báo cáo đã chọn",
                 ]
               ).map((q) => (
-                <button key={q} onClick={() => setQuestion(q)}>
+                <button
+                  key={q}
+                  type="button"
+                  onClick={() => {
+                    setQuestion(q);
+                    textarea.current?.focus();
+                  }}
+                >
                   {q}
                 </button>
               ))}
@@ -788,7 +839,12 @@ export function ChatPanel({
         {messages.map((m, index) => (
           <article key={m.id} className={`chat-message ${m.role}`}>
             <header>
-              {m.role === "user" ? "Bạn" : `${m.provider_name} · ${m.model_id}`}{" "}
+              {m.role === "assistant" && (
+                <span className="chat-avatar" aria-hidden="true">
+                  ✦
+                </span>
+              )}
+              {m.role === "assistant" && `${m.provider_name} · ${m.model_id}`}
               {m.role === "user" &&
                 m.attachments?.some((x) => x.type === "mirror_plot") && (
                   <small>
@@ -798,7 +854,7 @@ export function ChatPanel({
                       : ""}
                   </small>
                 )}
-              {m.role === "assistant" && (
+              {m.role === "assistant" && m.status !== "completed" && (
                 <small>
                   {(
                     {
@@ -831,10 +887,20 @@ export function ChatPanel({
                   }
                 />
               ) : (
-                m.content ||
-                (m.tool_progress?.length
-                  ? `Đang tra dữ liệu: ${m.tool_progress.map((t) => TOOL_LABELS[t] ?? t).join(" → ")}…`
-                  : "Đang xử lý dữ liệu…")
+                m.content || (
+                  <span className="chat-thinking" role="status">
+                    {["queued", "running"].includes(m.state) && (
+                      <span className="typing-dots" aria-hidden="true">
+                        <i />
+                        <i />
+                        <i />
+                      </span>
+                    )}
+                    {m.tool_progress?.length
+                      ? `Đang tra dữ liệu: ${m.tool_progress.map((t) => TOOL_LABELS[t] ?? t).join(" → ")}…`
+                      : "Đang xử lý dữ liệu…"}
+                  </span>
+                )
               )}
             </div>
             {m.role === "assistant" &&
@@ -921,7 +987,7 @@ export function ChatPanel({
               </p>
             )}
             {m.role === "assistant" && (
-              <div className="ai-actions">
+              <div className="ai-actions msg-actions">
                 <button onClick={() => void sources(m.request_id)}>
                   Nguồn dữ liệu & token
                 </button>
@@ -1101,19 +1167,15 @@ export function ChatPanel({
           void send(question);
         }}
       >
-        <label>
-          Câu hỏi
-          <textarea
-            required
-            maxLength={6000}
-            value={question}
-            onChange={(e) => setQuestion(e.target.value)}
-            disabled={
-              busy || active || isArchived || session.status === "closed"
-            }
-            placeholder="Nhập câu hỏi về báo cáo…"
+        {preview && conversation && (
+          <ContextMeter
+            preview={preview}
+            dismissed={hintDismissed === conversation}
+            disabled={busy || active || session.status === "closed"}
+            onDismiss={() => setHintDismissed(conversation)}
+            onNewChat={newConversation}
           />
-        </label>
+        )}
         {!question.trim() &&
           messages.length > 0 &&
           !!preview?.suggestions.length && (
@@ -1125,117 +1187,223 @@ export function ChatPanel({
               ))}
             </div>
           )}
-        {preview?.supportsVision && (
-          <label className="ai-check attach-spectrum">
-            <input
-              type="checkbox"
-              checked={attachSpectrum}
-              disabled={scope !== "selection" || preview.rows.examined !== 1}
-              onChange={(e) => setAttachSpectrum(e.target.checked)}
-            />
-            Kèm ảnh mirror plot của dòng đang chọn (~
-            {fmtTokens(1100)} token)
-          </label>
-        )}
-        {preview && (
-          <p className="send-scope">
-            Sẽ gửi:{" "}
-            {scope === "selection" &&
-            preview.rows.examined <
-              preview.reports.reduce((n, r) => n + r.rowCount, 0)
-              ? `${preview.rows.examined} dòng đang chọn`
-              : scope === "project"
-                ? `${preview.reports.length} báo cáo trong project`
-                : "toàn báo cáo"}{" "}
-            ·{" "}
-            {preview.reports
-              .map((r) => `${r.title} (revision ${r.revision})`)
-              .join(", ")}
-          </p>
-        )}
-        {preview ? (
-          <details className={`token-preview${preview.fits ? "" : " blocked"}`}>
-            <summary>
-              Dự toán ~{fmtTokens(preview.input)} token vào · tối đa{" "}
-              {fmtTokens(preview.outputMax)} ra · giữ chỗ ~
-              {fmtTokens(preview.reserve)}
-              {preview.toolRounds && " (+ mỗi vòng công cụ)"}
-            </summary>
-            <ul>
-              <li>Hướng dẫn: ~{fmtTokens(preview.breakdown.instructions)}</li>
-              <li>
-                Dữ liệu: ~{fmtTokens(preview.breakdown.data)} ·{" "}
-                {preview.rows.sent}/{preview.rows.examined} dòng
-                {preview.rows.truncated ? " (đã rút gọn)" : ""}
-              </li>
-              <li>
-                Lịch sử: ~{fmtTokens(preview.breakdown.history)} ·{" "}
-                {preview.history.included / 2} lượt gần nhất
-                {preview.history.omitted
-                  ? `, ${preview.history.omitted / 2} lượt cũ chỉ còn trích đoạn`
-                  : ""}
-              </li>
-              <li>Câu hỏi: ~{fmtTokens(preview.breakdown.question)}</li>
-              {preview.toolRounds && (
-                <li>Mô tả công cụ: ~{fmtTokens(preview.breakdown.tools)}</li>
-              )}
-            </ul>
-            <small>
-              Ước tính{" "}
-              {preview.calibrated
-                ? "đã hiệu chỉnh theo usage thật của model"
-                : "chưa hiệu chỉnh (model chưa có lượt nào có usage)"}
-              ; số thật lấy từ provider sau khi trả lời.
-            </small>
-          </details>
-        ) : (
-          previewError &&
-          conversation && (
-            <small className="token-preview">{previewError}</small>
-          )
-        )}
+        <div className={`composer-box${compose ? " is-busy" : ""}`}>
+          <textarea
+            aria-label="Câu hỏi"
+            required
+            rows={1}
+            maxLength={6000}
+            value={question}
+            ref={textarea}
+            onChange={(e) => setQuestion(e.target.value)}
+            onKeyDown={(e) => {
+              // Enter sends, Shift+Enter breaks the line (not while composing IME).
+              if (
+                e.key === "Enter" &&
+                !e.shiftKey &&
+                !e.nativeEvent.isComposing
+              ) {
+                e.preventDefault();
+                if (canSend) e.currentTarget.form?.requestSubmit();
+              }
+            }}
+            disabled={compose}
+            placeholder={
+              session.status === "closed"
+                ? "Phiên đã đóng"
+                : isArchived
+                  ? "Hội thoại đã lưu trữ"
+                  : "Hỏi về dữ liệu nghiên cứu…"
+            }
+          />
+          {preview?.supportsVision && (
+            <label className="ai-check attach-spectrum">
+              <input
+                type="checkbox"
+                checked={attachSpectrum}
+                disabled={scope !== "selection" || preview.rows.examined !== 1}
+                onChange={(e) => setAttachSpectrum(e.target.checked)}
+              />
+              Kèm ảnh mirror plot của dòng đang chọn (~{fmtTokens(1100)} token)
+            </label>
+          )}
+          <div className="composer-bar">
+            <select
+              aria-label="Phạm vi dữ liệu"
+              className="composer-scope"
+              value={scope}
+              disabled={busy || active}
+              onChange={(e) => setScope(e.target.value as typeof scope)}
+            >
+              <option value="selection">Dòng đang chọn</option>
+              <option value="report">Báo cáo đang mở</option>
+              <option value="project">Cả project</option>
+            </select>
+            {scope === "project" && (
+              <details className="composer-pop">
+                <summary>
+                  {chosenReports.length
+                    ? `${chosenReports.length} báo cáo`
+                    : "Mọi báo cáo"}
+                </summary>
+                <fieldset>
+                  <legend>Không chọn = toàn project, tối đa 10</legend>
+                  {reports.map((r) => (
+                    <label key={r.id} className="ai-check">
+                      <input
+                        type="checkbox"
+                        disabled={busy || active}
+                        checked={chosenReports.includes(r.id)}
+                        onChange={(e) =>
+                          setChosenReports((prev) =>
+                            e.target.checked
+                              ? [...prev, r.id]
+                              : prev.filter((id) => id !== r.id),
+                          )
+                        }
+                      />
+                      {r.title}
+                    </label>
+                  ))}
+                </fieldset>
+              </details>
+            )}
+            <span className="composer-spacer" />
+            {preview && (
+              <details
+                className={`composer-pop token-preview${preview.fits ? "" : " blocked"}`}
+              >
+                <summary title="Dự toán token của câu hỏi này">
+                  ~{fmtTokens(preview.input)} token
+                </summary>
+                <div className="composer-pop-body">
+                  <p>
+                    Vào ~{fmtTokens(preview.input)} · ra tối đa{" "}
+                    {fmtTokens(preview.outputMax)} · giữ chỗ ~
+                    {fmtTokens(preview.reserve)}
+                    {preview.toolRounds && " (+ mỗi vòng công cụ)"}
+                  </p>
+                  <ul>
+                    <li>
+                      Hướng dẫn: ~{fmtTokens(preview.breakdown.instructions)}
+                    </li>
+                    <li>
+                      Dữ liệu: ~{fmtTokens(preview.breakdown.data)} ·{" "}
+                      {preview.rows.sent}/{preview.rows.examined} dòng
+                      {preview.rows.truncated ? " (đã rút gọn)" : ""}
+                    </li>
+                    <li>
+                      Lịch sử: ~{fmtTokens(preview.breakdown.history)} ·{" "}
+                      {preview.history.included / 2} lượt gần nhất
+                      {preview.history.omitted
+                        ? `, ${preview.history.omitted / 2} lượt cũ chỉ còn trích đoạn`
+                        : ""}
+                    </li>
+                    <li>Câu hỏi: ~{fmtTokens(preview.breakdown.question)}</li>
+                    {preview.toolRounds && (
+                      <li>
+                        Mô tả công cụ: ~{fmtTokens(preview.breakdown.tools)}
+                      </li>
+                    )}
+                  </ul>
+                  <small>
+                    Ước tính{" "}
+                    {preview.calibrated
+                      ? "đã hiệu chỉnh theo usage thật của model"
+                      : "chưa hiệu chỉnh (model chưa có lượt nào có usage)"}
+                    ; số thật lấy từ provider sau khi trả lời.
+                  </small>
+                  {quotas[effectiveProviderId] && (
+                    <QuotaMeter quota={quotas[effectiveProviderId]!} />
+                  )}
+                </div>
+              </details>
+            )}
+            <span className="composer-model">
+              <ModelPicker
+                providers={providers}
+                value={choice}
+                defaultLabel={defaultLabel}
+                onChange={(v) => {
+                  setChoice(v);
+                  setNotice("");
+                }}
+                disabled={busy || active}
+              />
+            </span>
+            {active ? (
+              <button
+                type="button"
+                className="composer-send stop"
+                aria-label="Dừng trả lời"
+                title="Dừng trả lời"
+                onClick={() => {
+                  const id =
+                    request?.requestId ??
+                    messages.find(
+                      (m) =>
+                        m.role === "assistant" &&
+                        ["queued", "running"].includes(m.state),
+                    )?.request_id;
+                  if (id)
+                    void jsonApi<RequestState>(
+                      `/api/ai/requests/${id}/cancel`,
+                      jsonBody({}),
+                    )
+                      .then((data) => setRequest(data))
+                      .catch((e) => setError(e.message));
+                }}
+              >
+                ■
+              </button>
+            ) : (
+              <button
+                type="submit"
+                className="composer-send"
+                aria-label={busy ? "Đang gửi" : "Gửi câu hỏi"}
+                aria-busy={busy}
+                title="Gửi (Enter)"
+                disabled={!canSend}
+              >
+                {busy ? <span className="send-spinner" /> : "↑"}
+              </button>
+            )}
+          </div>
+        </div>
         {preview && !preview.fits && (
           <p className="ai-error">{preview.reason}</p>
         )}
-        <div className="ai-actions">
-          <button
-            disabled={
-              !conversation ||
-              busy ||
-              active ||
-              isArchived ||
-              session.status === "closed" ||
-              !question.trim() ||
-              preview?.fits === false
-            }
-            type="submit"
-          >
-            {busy ? "Đang gửi…" : "Gửi câu hỏi"}
-          </button>
-          {active && (
-            <button
-              type="button"
-              onClick={() => {
-                const id =
-                  request?.requestId ??
-                  messages.find(
-                    (m) =>
-                      m.role === "assistant" &&
-                      ["queued", "running"].includes(m.state),
-                  )?.request_id;
-                if (id)
-                  void jsonApi<RequestState>(
-                    `/api/ai/requests/${id}/cancel`,
-                    jsonBody({}),
-                  )
-                    .then((data) => setRequest(data))
-                    .catch((e) => setError(e.message));
-              }}
-            >
-              Dừng trả lời
-            </button>
+        {!preview && previewError && conversation && (
+          <small className="composer-note">{previewError}</small>
+        )}
+        <small className="composer-note">
+          {preview
+            ? `Sẽ gửi ${
+                scope === "selection" &&
+                preview.rows.examined <
+                  preview.reports.reduce((n, r) => n + r.rowCount, 0)
+                  ? `${preview.rows.examined} dòng đang chọn`
+                  : scope === "project"
+                    ? `${preview.reports.length} báo cáo trong project`
+                    : "toàn báo cáo"
+              } (${preview.reports.map((r) => `${r.title} r${r.revision}`).join(", ")}) tới ${effectiveProvider?.name ?? "provider"}. `
+            : "Dữ liệu trong phạm vi đã chọn được gửi tới provider khi bạn hỏi. "}
+          {choice && choice !== defaultChoice ? (
+            <>
+              Model mới áp dụng từ câu hỏi tiếp theo ·{" "}
+              <button
+                type="button"
+                className="link-button"
+                disabled={busy}
+                onClick={() => void rememberModel()}
+              >
+                Ghi nhớ cho phiên
+              </button>
+            </>
+          ) : (
+            "AI có thể sai: hãy kiểm chứng trích dẫn trước khi dùng."
           )}
-        </div>
+        </small>
       </form>
     </section>
   );
